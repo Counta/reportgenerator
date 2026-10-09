@@ -1,0 +1,4 @@
+{
+  "defaultProvider": "intern",
+  "defaultModel": "deepseek-v4-flash-vision"
+}
