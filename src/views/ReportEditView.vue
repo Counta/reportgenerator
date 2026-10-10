@@ -35,7 +35,6 @@ const exportStatus = ref('')
 const isInsertModalOpen = ref(false)
 const insertModalDefaultPage = ref(1)
 
-// ================= 撤销 / 重做 历史管理器 =================
 interface HistorySnapshot {
   title: string
   values: Record<string, string>
@@ -192,7 +191,6 @@ function redo() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  // 如果输入法正在打字合成中（如拼音选词），直接放行
   if (e.isComposing || e.keyCode === 229) return
 
   const isMod = e.ctrlKey || e.metaKey
@@ -483,7 +481,6 @@ function goBack() {
           @compositionend="onTitleCompEnd"
           @input="onTitleInput"
         />
-        <!-- 撤销 / 重做 按钮组 -->
         <div class="history-btns">
           <button
             type="button"
@@ -529,7 +526,6 @@ function goBack() {
           </button>
         </div>
 
-        <!-- 撤销重做按钮右侧：+行 / -行 / +列 / -列 快捷调节组（附直观图标） -->
         <div class="table-adjust-btns">
           <button
             type="button"
@@ -705,7 +701,6 @@ function goBack() {
       </main>
     </div>
 
-    <!-- 插入表格弹窗 -->
     <InsertTableModal
       v-model:visible="isInsertModalOpen"
       :default-page="insertModalDefaultPage"

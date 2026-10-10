@@ -92,7 +92,6 @@ function commit(patch: Partial<TableData>) {
   })
 }
 
-/* ================= 拖动表格 ================= */
 function onMoveStart(e: PointerEvent) {
   if (!props.editable) return
   const pageEl = getPageEl(e.currentTarget)
@@ -129,7 +128,6 @@ function onMoveStart(e: PointerEvent) {
   window.addEventListener('pointerup', onUp)
 }
 
-/* ================= 调整单列列宽 ================= */
 function onColResizeStart(e: PointerEvent, colIdx: number) {
   if (!props.editable) return
   e.stopPropagation()
@@ -172,7 +170,6 @@ function onColResizeStart(e: PointerEvent, colIdx: number) {
   window.addEventListener('pointerup', onUp)
 }
 
-/* ================= 调整单行行高 ================= */
 function onRowResizeStart(e: PointerEvent, rowIdx: number) {
   if (!props.editable) return
   e.stopPropagation()
@@ -215,7 +212,6 @@ function onRowResizeStart(e: PointerEvent, rowIdx: number) {
   window.addEventListener('pointerup', onUp)
 }
 
-/* ================= 插入多一列（在指定表格线处） ================= */
 function insertColAt(insertIdx: number) {
   if (props.table.cols >= 15) return
   const prevW =
@@ -240,7 +236,6 @@ function insertColAt(insertIdx: number) {
   })
 }
 
-/* ================= 插入多一行（在指定表格线处） ================= */
 function insertRowAt(insertIdx: number) {
   if (props.table.rows >= 25) return
   const prevH =
@@ -266,7 +261,6 @@ function insertRowAt(insertIdx: number) {
   })
 }
 
-/* ================= 右下角整体等比拉伸 ================= */
 function onCornerResizeStart(e: PointerEvent) {
   if (!props.editable) return
   e.stopPropagation()
@@ -310,7 +304,6 @@ function onCornerResizeStart(e: PointerEvent) {
   window.addEventListener('pointerup', onUp)
 }
 
-/* ================= 单元格文本输入 ================= */
 let isComposing = false
 
 function onCompStart() {
@@ -342,7 +335,6 @@ function onRemove() {
   emit('remove', props.table.id)
 }
 
-/** 动态计算每个单元格的自适应字号（根据列宽、行高与文字长度） */
 function getCellFontSize(r: number, c: number): string {
   const colW = props.table.colWidths[c] || 80
   const rowH = props.table.rowHeights[r] || 24
@@ -361,7 +353,6 @@ function getCellFontSize(r: number, c: number): string {
     :class="{ 'is-moving': isMoving, editable }"
     :style="containerStyle"
   >
-    <!-- 顶部拖动条（无任何文字与按钮） -->
     <div
       v-if="editable"
       class="t-toolbar"
@@ -370,7 +361,6 @@ function getCellFontSize(r: number, c: number): string {
       <span class="t-drag-bar" />
     </div>
 
-    <!-- 悬浮删除按钮（左上角角标，直接删除无二次确认） -->
     <button
       v-if="editable"
       type="button"
@@ -390,7 +380,6 @@ function getCellFontSize(r: number, c: number): string {
       </svg>
     </button>
 
-    <!-- 表格主体 -->
     <div class="t-body">
       <div
         v-for="r in table.rows"
@@ -426,7 +415,6 @@ function getCellFontSize(r: number, c: number): string {
         </div>
       </div>
 
-      <!-- 列宽调整手柄（每列右边界，贯穿全表；表格线上方带有加号按钮，用于插入多一列） -->
       <template v-if="editable">
         <div
           v-for="(pctPos, cIdx) in colDividerPcts"
@@ -458,7 +446,6 @@ function getCellFontSize(r: number, c: number): string {
         </div>
       </template>
 
-      <!-- 行高调整手柄（每行底边界，贯穿全表；表格线右方带有加号按钮，用于插入多一行） -->
       <template v-if="editable">
         <div
           v-for="(pctPos, rIdx) in rowDividerPcts"
@@ -468,7 +455,6 @@ function getCellFontSize(r: number, c: number): string {
           :style="{ top: `calc(${pctPos}% - 6px)` }"
           @pointerdown="onRowResizeStart($event, rIdx)"
         >
-          <!-- 仅在非最后一行显示加号按钮（避免与右下角整表等比拉伸角标冲突） -->
           <button
             v-if="rIdx < table.rows - 1"
             type="button"
@@ -492,7 +478,6 @@ function getCellFontSize(r: number, c: number): string {
         </div>
       </template>
 
-      <!-- 右下角等比缩放手柄 -->
       <div
         v-if="editable"
         class="t-corner-handle"
@@ -516,7 +501,6 @@ function getCellFontSize(r: number, c: number): string {
   box-shadow: 0 8px 24px rgba(37, 99, 235, 0.25);
 }
 
-/* 顶部纯拖动条（无文字、无按钮） */
 .t-toolbar {
   position: relative;
   height: 10px;
@@ -550,7 +534,6 @@ function getCellFontSize(r: number, c: number): string {
   pointer-events: none;
 }
 
-/* 悬停左上角角标显示的删除按钮（直接删除无二次确认） */
 .t-float-del {
   position: absolute;
   top: -8px;
@@ -583,7 +566,6 @@ function getCellFontSize(r: number, c: number): string {
   background: #dc2626;
 }
 
-/* 表格主体 */
 .t-body {
   position: relative;
   flex: 1;
@@ -646,7 +628,6 @@ function getCellFontSize(r: number, c: number): string {
   overflow: hidden;
 }
 
-/* 列宽调整手柄（竖线），贯穿全表 */
 .t-col-handle {
   position: absolute;
   top: -14px;
@@ -671,7 +652,6 @@ function getCellFontSize(r: number, c: number): string {
   background: #2563eb;
 }
 
-/* 列线上方加号按钮（插入多一列） */
 .t-insert-col-btn {
   position: absolute;
   top: 0;
@@ -704,7 +684,6 @@ function getCellFontSize(r: number, c: number): string {
   transform: translateX(-50%) scale(1.18);
 }
 
-/* 行高调整手柄（横线），贯穿全表 */
 .t-row-handle {
   position: absolute;
   left: 0;
@@ -729,7 +708,6 @@ function getCellFontSize(r: number, c: number): string {
   background: #2563eb;
 }
 
-/* 行线右方加号按钮（插入多一行） */
 .t-insert-row-btn {
   position: absolute;
   right: 0;
@@ -762,7 +740,6 @@ function getCellFontSize(r: number, c: number): string {
   transform: translateY(-50%) scale(1.18);
 }
 
-/* 右下角拉伸角标 */
 .t-corner-handle {
   position: absolute;
   right: -3px;

@@ -123,7 +123,6 @@ function onKeydown(e: KeyboardEvent) {
       </header>
 
       <div class="modal-body">
-        <!-- 目标页选择 -->
         <div class="form-row">
           <span class="form-label">插入位置</span>
           <div class="page-pills">
@@ -146,7 +145,6 @@ function onKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <!-- 快捷网格选择器 -->
         <div class="grid-picker-wrap">
           <div class="grid-picker-header">
             <span class="picker-tip">快捷选择行列</span>
@@ -180,7 +178,6 @@ function onKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <!-- 详细步进调节 -->
         <div class="steppers-wrap">
           <div class="stepper-item">
             <label class="stepper-label">行数</label>
@@ -372,7 +369,6 @@ function onKeydown(e: KeyboardEvent) {
   font-weight: 600;
 }
 
-/* 网格快速选择器 */
 .grid-picker-wrap {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -427,7 +423,6 @@ function onKeydown(e: KeyboardEvent) {
   border-color: #2563eb;
 }
 
-/* 步进微调 */
 .steppers-wrap {
   display: flex;
   gap: 16px;
@@ -493,7 +488,6 @@ function onKeydown(e: KeyboardEvent) {
   margin: 0;
 }
 
-/* 底部操作 */
 .modal-footer {
   display: flex;
   justify-content: flex-end;

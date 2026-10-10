@@ -83,7 +83,6 @@ function onRemoveTable(tableId: string) {
   emit('remove:table', tableId)
 }
 
-/* ================= 中文输入法 IME 合成保护 ================= */
 let isComposing = false
 
 function onCompStart() {
@@ -130,17 +129,14 @@ function onInputContinuation(e: Event) {
         height: p.height,
       }"
     >
-      <!-- 课程名称：纸面上仅作为静态文字展示，选项只在 topbar 中切换 -->
       <div v-if="p.field.id === 'courseType'" class="course-text-preview">
         {{ data.values['courseType'] || '模拟电路' }}
       </div>
 
-      <!-- 第 2 页实验内容接续区 -->
       <div
         v-else-if="p.field.id === 'contentContinuation'"
         class="field-box"
       >
-        <!-- 左侧边表格图标按钮（第 2 页接续区） -->
         <button
           v-if="editable"
           type="button"
@@ -179,7 +175,6 @@ function onInputContinuation(e: Event) {
         </span>
       </div>
 
-      <!-- 单行输入框 -->
       <input
         v-else-if="p.field.type === 'input'"
         :value="data.values[p.field.id] ?? ''"
@@ -190,9 +185,7 @@ function onInputContinuation(e: Event) {
         @input="onInputField($event, p.field.id)"
       />
 
-      <!-- 多行文本域（含第 1 页实验内容及溢出提示） -->
       <div v-else class="field-box">
-        <!-- 在第 1 页“实验内容”左侧边显示插入表格图标按钮 -->
         <button
           v-if="p.field.id === 'content' && editable"
           type="button"
@@ -231,7 +224,6 @@ function onInputContinuation(e: Event) {
       </div>
     </div>
 
-    <!-- 「实验内容」插入的表格 -->
     <TableOverlay
       v-for="t in pageTables"
       :key="'table-' + t.id"
