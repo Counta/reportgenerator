@@ -1,6 +1,6 @@
 import { PAGE_SIZE_PT } from '@/types'
-import type { FormTemplate, ReportData } from '@/types'
-import { splitExperimentContent } from '@/lib/textLayout'
+import type { FormTemplate, ReportData, TableData } from '@/types'
+import { splitExperimentContent, calcCellFontSizePt } from '@/lib/textLayout'
 
 /**
  * 逐页导出：将背景图与填写内容合成为 PNG。
@@ -131,6 +131,127 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   })
 }
 
+/** 绘制单元格文本（居中对齐，自适应字号） */
+function drawTableCellText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  cellRect: { x: number; y: number; w: number; h: number },
+  ptToPx: number,
+  colWidthPt: number,
+  rowHeightPt: number,
+) {
+  if (!text) return
+  const sizePt = calcCellFontSizePt(text, colWidthPt, rowHeightPt)
+  const fontSize = Math.max(sizePt * ptToPx, 8)
+  const lineHeight = fontSize * 1.3
+  ctx.font = `${fontSize}px ${FONT_FAMILY}`
+  ctx.fillStyle = '#000000'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  const lines: string[] = []
+  for (const para of text.split('\n')) {
+    let line = ''
+    for (const ch of para) {
+      if (line !== '' && ctx.measureText(line + ch).width > cellRect.w) {
+        lines.push(line)
+        line = ch
+      } else {
+        line += ch
+      }
+    }
+    lines.push(line)
+  }
+
+  const totalTextH = lines.length * lineHeight
+  let startY =
+    cellRect.y + cellRect.h / 2 - totalTextH / 2 + lineHeight / 2
+  const centerX = cellRect.x + cellRect.w / 2
+
+  for (const line of lines) {
+    ctx.fillText(line, centerX, startY)
+    startY += lineHeight
+    if (startY > cellRect.y + cellRect.h + lineHeight / 2) break
+  }
+}
+
+/** 绘制表格到画布上 */
+function drawTable(
+  ctx: CanvasRenderingContext2D,
+  table: TableData,
+  ptToPx: number,
+) {
+  const totalW = table.colWidths.reduce((a, b) => a + b, 0)
+  const totalH = table.rowHeights.reduce((a, b) => a + b, 0)
+  const startX = px(table.x, ptToPx)
+  const startY = px(table.y, ptToPx)
+  const w = px(totalW, ptToPx)
+  const h = px(totalH, ptToPx)
+
+  // 白色填充底色，遮挡下方的横线
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(startX, startY, w, h)
+
+  // 边框粗细
+  const lineWidth = Math.max(1, Math.round(ptToPx * 0.75))
+  ctx.strokeStyle = '#333333'
+  ctx.lineWidth = lineWidth
+
+  // 外边框
+  ctx.strokeRect(startX, startY, w, h)
+
+  // 内部单元格线及文本
+  let currentY = startY
+  for (let r = 0; r < table.rows; r++) {
+    const rowH = px(table.rowHeights[r], ptToPx)
+    let currentX = startX
+
+    for (let c = 0; c < table.cols; c++) {
+      const colW = px(table.colWidths[c], ptToPx)
+
+      // 竖直分割线
+      if (c < table.cols - 1) {
+        ctx.beginPath()
+        ctx.moveTo(currentX + colW, currentY)
+        ctx.lineTo(currentX + colW, currentY + rowH)
+        ctx.stroke()
+      }
+
+      // 绘制单元格文本（自适应字号）
+      const cellText = table.cells[r]?.[c] ?? ''
+      if (cellText) {
+        const padding = px(3, ptToPx)
+        const cellRect = {
+          x: currentX + padding,
+          y: currentY + padding,
+          w: Math.max(colW - padding * 2, 1),
+          h: Math.max(rowH - padding * 2, 1),
+        }
+        drawTableCellText(
+          ctx,
+          cellText,
+          cellRect,
+          ptToPx,
+          table.colWidths[c],
+          table.rowHeights[r],
+        )
+      }
+
+      currentX += colW
+    }
+
+    // 水平分割线
+    if (r < table.rows - 1) {
+      ctx.beginPath()
+      ctx.moveTo(startX, currentY + rowH)
+      ctx.lineTo(startX + w, currentY + rowH)
+      ctx.stroke()
+    }
+
+    currentY += rowH
+  }
+}
+
 /**
  * 导出指定页的合成图。
  * @param page 页码（1 起）
@@ -177,6 +298,15 @@ export async function exportPage(
     }
 
     drawField(ctx, value, f.rect, dpi, f.id)
+  }
+
+  // 绘制属于该页的浮动表格
+  if (Array.isArray(data.tables)) {
+    for (const t of data.tables) {
+      if (t.page === page) {
+        drawTable(ctx, t, dpi)
+      }
+    }
   }
 
   return { dataUrl: canvas.toDataURL('image/png'), width: outW, height: outH }

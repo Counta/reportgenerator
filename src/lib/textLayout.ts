@@ -87,3 +87,52 @@ export function splitExperimentContent(
     isOverflow: page2Lines.length > 0,
   }
 }
+
+/**
+ * 根据单元格可用宽度、高度及填入的文本，自适应计算最佳字号（PDF 点）。
+ * 保证单元格内容自适应缩放，既不超出单元格边界，又能保持良好的可读性。
+ */
+export function calcCellFontSizePt(
+  text: string,
+  colWidthPt: number,
+  rowHeightPt: number,
+): number {
+  // 1. 基准字号：约占行高的 48%（默认 24pt 行高约 11.5pt，最高 16pt，最低 7pt）
+  const baseSize = Math.max(7, Math.min(16, rowHeightPt * 0.48))
+  if (!text || text.trim() === '') {
+    return Math.round(baseSize * 10) / 10
+  }
+
+  // 2. 可用宽高度（两侧预留 6pt 内边距，上下预留 4pt）
+  const availW = Math.max(8, colWidthPt - 6)
+  const availH = Math.max(8, rowHeightPt - 4)
+
+  const lines = text.split('\n')
+  // 估算一行文本在 1em 下的宽度（全角字符 1.0，半角字符约 0.58）
+  const emOf = (s: string) => {
+    let em = 0
+    for (const ch of s) {
+      em += ch.charCodeAt(0) > 255 ? 1.0 : 0.58
+    }
+    return Math.max(em, 0.6)
+  }
+
+  const maxLineEm = lines.reduce((max, l) => Math.max(max, emOf(l)), 0)
+
+  // 3. 宽度约束下的目标字号
+  let size = baseSize
+  if (maxLineEm * size > availW) {
+    size = availW / maxLineEm
+  }
+
+  // 4. 高度约束下的目标字号（行距约为 fontSize * 1.3）
+  const lineCount = lines.length
+  const totalHNeeded = lineCount * size * 1.3
+  if (totalHNeeded > availH) {
+    size = availH / (lineCount * 1.3)
+  }
+
+  // 5. 限制范围在 6.5pt 到 16pt 之间
+  const clamped = Math.max(6.5, Math.min(16, size))
+  return Math.round(clamped * 10) / 10
+}

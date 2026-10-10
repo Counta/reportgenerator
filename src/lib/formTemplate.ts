@@ -30,8 +30,14 @@ function field(
 }
 
 /** 内容区左边距与右边距（正文区域） */
-const BODY_LEFT = 91.7
-const BODY_RIGHT = 766.8
+export const BODY_LEFT = 91.7
+export const BODY_RIGHT = 766.8
+
+/** 「实验内容」可填写区域（浮动表格默认放置其内） */
+export const CONTENT_REGION = {
+  page1: { x: BODY_LEFT, y: 558, w: BODY_RIGHT - BODY_LEFT, h: 545 },
+  page2: { x: BODY_LEFT, y: 98, w: BODY_RIGHT - BODY_LEFT, h: 680 },
+} as const
 
 export const formTemplate: FormTemplate = {
   id: 'tianjin-normal-lab-report',

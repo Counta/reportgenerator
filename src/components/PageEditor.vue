@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { FieldDef, FormTemplate, ReportData } from '@/types'
+import type { FieldDef, FormTemplate, ReportData, TableData } from '@/types'
 import { PAGE_SIZE_PT } from '@/types'
 import { splitExperimentContent } from '@/lib/textLayout'
+import TableOverlay from '@/components/TableOverlay.vue'
 
 const props = defineProps<{
   page: number
@@ -15,6 +16,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:field', fieldId: string, value: string): void
+  (e: 'update:table', table: TableData): void
+  (e: 'remove:table', tableId: string): void
+  (e: 'open:insert-table', page: number): void
+  (e: 'gesture-start'): void
+  (e: 'gesture-end'): void
 }>()
 
 /** 页面尺寸（点）换算为百分比定位 */
@@ -63,6 +69,50 @@ function onContinuationInput(val: string) {
   const combined = p1Text + (val ? '\n' + val : '')
   emit('update:field', 'content', combined)
 }
+
+/** 本页的表格 */
+const pageTables = computed<TableData[]>(() =>
+  (props.data.tables || []).filter((t) => t.page === props.page),
+)
+
+function onUpdateTable(table: TableData) {
+  emit('update:table', table)
+}
+
+function onRemoveTable(tableId: string) {
+  emit('remove:table', tableId)
+}
+
+/* ================= 中文输入法 IME 合成保护 ================= */
+let isComposing = false
+
+function onCompStart() {
+  isComposing = true
+}
+
+function onCompEndField(e: Event, fieldId: string) {
+  isComposing = false
+  const val = (e.target as HTMLInputElement | HTMLTextAreaElement).value
+  emit('update:field', fieldId, val)
+}
+
+function onInputField(e: Event, fieldId: string) {
+  if (isComposing) return
+  const val = (e.target as HTMLInputElement | HTMLTextAreaElement).value
+  emit('update:field', fieldId, val)
+}
+
+function onCompEndContinuation(e: Event) {
+  isComposing = false
+  const val = (e.target as HTMLTextAreaElement).value
+  onContinuationInput(val)
+}
+
+function onInputContinuation(e: Event) {
+  if (isComposing) return
+  const val = (e.target as HTMLTextAreaElement).value
+  onContinuationInput(val)
+}
 </script>
 
 <template>
@@ -90,15 +140,39 @@ function onContinuationInput(val: string) {
         v-else-if="p.field.id === 'contentContinuation'"
         class="field-box"
       >
+        <!-- 左侧边表格图标按钮（第 2 页接续区） -->
+        <button
+          v-if="editable"
+          type="button"
+          class="insert-table-side-btn"
+          @click.stop="emit('open:insert-table', page)"
+        >
+          <svg
+            class="side-btn-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+          </svg>
+        </button>
+
         <textarea
           :value="continuationText"
           class="layer-textarea"
           :placeholder="
             experimentSplit.isOverflow
-              ? '实验内容（接续区）'
-              : '实验内容接续区（第 1 页实验内容溢出时，自动在此处接续排版）'
+              ? '实验内容'
+              : ''
           "
-          @input="onContinuationInput(($event.target as HTMLTextAreaElement).value)"
+          @compositionstart="onCompStart"
+          @compositionend="onCompEndContinuation"
+          @input="onInputContinuation"
         />
         <span v-if="experimentSplit.isOverflow" class="box-badge">
           已自动接续自第 1 页（第 23+ 行）
@@ -111,16 +185,42 @@ function onContinuationInput(val: string) {
         :value="data.values[p.field.id] ?? ''"
         class="layer-input"
         :placeholder="p.field.label"
-        @input="emit('update:field', p.field.id, ($event.target as HTMLInputElement).value)"
+        @compositionstart="onCompStart"
+        @compositionend="onCompEndField($event, p.field.id)"
+        @input="onInputField($event, p.field.id)"
       />
 
       <!-- 多行文本域（含第 1 页实验内容及溢出提示） -->
       <div v-else class="field-box">
+        <!-- 在第 1 页“实验内容”左侧边显示插入表格图标按钮 -->
+        <button
+          v-if="p.field.id === 'content' && editable"
+          type="button"
+          class="insert-table-side-btn"
+          @click.stop="emit('open:insert-table', page)"
+        >
+          <svg
+            class="side-btn-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+          </svg>
+        </button>
+
         <textarea
           :value="data.values[p.field.id] ?? ''"
           class="layer-textarea"
           :placeholder="p.field.label"
-          @input="emit('update:field', p.field.id, ($event.target as HTMLTextAreaElement).value)"
+          @compositionstart="onCompStart"
+          @compositionend="onCompEndField($event, p.field.id)"
+          @input="onInputField($event, p.field.id)"
         />
         <span
           v-if="p.field.id === 'content' && experimentSplit.isOverflow"
@@ -130,6 +230,18 @@ function onContinuationInput(val: string) {
         </span>
       </div>
     </div>
+
+    <!-- 「实验内容」插入的表格 -->
+    <TableOverlay
+      v-for="t in pageTables"
+      :key="'table-' + t.id"
+      :table="t"
+      :editable="editable"
+      @update="onUpdateTable"
+      @remove="onRemoveTable"
+      @gesture-start="emit('gesture-start')"
+      @gesture-end="emit('gesture-end')"
+    />
   </div>
 </template>
 
@@ -142,6 +254,7 @@ function onContinuationInput(val: string) {
   background: #fff;
   overflow: hidden;
   user-select: none;
+  container-type: inline-size;
 }
 
 .bg {
@@ -227,5 +340,35 @@ function onContinuationInput(val: string) {
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 左侧边表格插入按钮 */
+.insert-table-side-btn {
+  position: absolute;
+  left: -46px;
+  top: 4px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 8;
+  user-select: none;
+}
+
+.insert-table-side-btn:hover {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+  transform: scale(1.06);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
 }
 </style>

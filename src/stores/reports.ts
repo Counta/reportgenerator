@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ReportData } from '@/types'
+import type { ReportData, TableData } from '@/types'
 import {
   getUserProfile,
   saveUserProfile,
@@ -18,6 +18,10 @@ function loadFromStorage(): ReportData[] {
     return parsed.map((r: ReportData) => {
       if (r && r.values && r.values.topic) {
         r.title = r.values.topic
+      }
+      // 兼容旧数据：没有 tables 字段时补空数组
+      if (r && !Array.isArray(r.tables)) {
+        r.tables = []
       }
       return r
     })
@@ -38,6 +42,16 @@ function uid(): string {
   return (
     Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
   )
+}
+
+/** 深拷贝一张表格（避免与原报告共享引用） */
+function cloneTable(t: TableData): TableData {
+  return {
+    ...t,
+    colWidths: [...t.colWidths],
+    rowHeights: [...t.rowHeights],
+    cells: t.cells.map((row) => [...row]),
+  }
 }
 
 export const useReportsStore = defineStore('reports', () => {
@@ -68,6 +82,7 @@ export const useReportsStore = defineStore('reports', () => {
         teammates: profile.teammates || '',
         date: today, // 日期默认填入创建报告时之日期
       },
+      tables: [],
     }
     reports.value.unshift(report)
     save()
@@ -86,6 +101,7 @@ export const useReportsStore = defineStore('reports', () => {
       createdAt: now,
       updatedAt: now,
       values: { ...src.values },
+      tables: (src.tables || []).map(cloneTable),
     }
     reports.value.unshift(copy)
     save()
@@ -118,6 +134,7 @@ export const useReportsStore = defineStore('reports', () => {
       saveUserProfile({ [fieldId]: value })
     }
 
+    reports.value = [...reports.value]
     save()
   }
 
@@ -129,6 +146,61 @@ export const useReportsStore = defineStore('reports', () => {
     // 同步课题字段
     report.values['topic'] = title
     report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 插入一张表格 */
+  function addTable(reportId: string, table: TableData) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report) return
+    if (!Array.isArray(report.tables)) report.tables = []
+    report.tables.push(cloneTable(table))
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 更新某张表格（整体替换） */
+  function updateTable(reportId: string, table: TableData) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report || !Array.isArray(report.tables)) return
+    const idx = report.tables.findIndex((t) => t.id === table.id)
+    if (idx < 0) return
+    report.tables[idx] = cloneTable(table)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 删除某张表格 */
+  function removeTable(reportId: string, tableId: string) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report || !Array.isArray(report.tables)) return
+    const idx = report.tables.findIndex((t) => t.id === tableId)
+    if (idx < 0) return
+    report.tables.splice(idx, 1)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 从快照完整恢复报告数据（撤销/重做） */
+  function restoreSnapshot(
+    reportId: string,
+    snapshot: {
+      title: string
+      values: Record<string, string>
+      tables: TableData[]
+    },
+  ) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report) return
+    report.title = snapshot.title
+    report.values = { ...snapshot.values }
+    report.tables = (snapshot.tables || []).map(cloneTable)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
     save()
   }
 
@@ -150,6 +222,9 @@ export const useReportsStore = defineStore('reports', () => {
           obj.values && typeof obj.values === 'object'
             ? (obj.values as Record<string, string>)
             : {},
+        tables: Array.isArray(obj.tables)
+          ? (obj.tables as TableData[]).map(cloneTable)
+          : [],
       }
       reports.value.unshift(report)
       count++
@@ -171,6 +246,10 @@ export const useReportsStore = defineStore('reports', () => {
     remove,
     setFieldValue,
     setTitle,
+    addTable,
+    updateTable,
+    removeTable,
+    restoreSnapshot,
     importReports,
     exportJson,
   }

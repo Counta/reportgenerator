@@ -45,6 +45,30 @@ export interface ReportData {
   updatedAt: string
   /** 字段值：fieldId -> 文本 */
   values: Record<string, string>
+  /** 「实验内容」区域插入的表格（浮动层） */
+  tables?: TableData[]
+}
+
+/** 实验内容中插入的表格 */
+export interface TableData {
+  /** 唯一标识 */
+  id: string
+  /** 所在页（1 或 2） */
+  page: number
+  /** 左上角横坐标（PDF 点，相对页面左上角） */
+  x: number
+  /** 左上角纵坐标（PDF 点） */
+  y: number
+  /** 列数 */
+  cols: number
+  /** 行数 */
+  rows: number
+  /** 各列宽度（PDF 点），长度为 cols */
+  colWidths: number[]
+  /** 各行高度（PDF 点），长度为 rows */
+  rowHeights: number[]
+  /** 单元格文本：cells[行][列] */
+  cells: string[][]
 }
 
 /** 表单模板：页面信息 + 字段列表 */
