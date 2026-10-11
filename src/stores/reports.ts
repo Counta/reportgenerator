@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ReportData, TableData } from '@/types'
+import type { CircuitData, ReportData, TableData } from '@/types'
+import { cloneCircuit } from '@/lib/circuit'
 import {
   getUserProfile,
   saveUserProfile,
@@ -22,6 +23,9 @@ function loadFromStorage(): ReportData[] {
       // 兼容旧数据：没有 tables 字段时补空数组
       if (r && !Array.isArray(r.tables)) {
         r.tables = []
+      }
+      if (r && !Array.isArray(r.circuits)) {
+        r.circuits = []
       }
       return r
     })
@@ -83,6 +87,7 @@ export const useReportsStore = defineStore('reports', () => {
         date: today, // 日期默认填入创建报告时之日期
       },
       tables: [],
+      circuits: [],
     }
     reports.value.unshift(report)
     save()
@@ -102,6 +107,7 @@ export const useReportsStore = defineStore('reports', () => {
       updatedAt: now,
       values: { ...src.values },
       tables: (src.tables || []).map(cloneTable),
+      circuits: (src.circuits || []).map(cloneCircuit),
     }
     reports.value.unshift(copy)
     save()
@@ -185,6 +191,31 @@ export const useReportsStore = defineStore('reports', () => {
     save()
   }
 
+  /** 插入 / 更新电路图（按 id 覆盖） */
+  function upsertCircuit(reportId: string, circuit: CircuitData) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report) return
+    if (!Array.isArray(report.circuits)) report.circuits = []
+    const idx = report.circuits.findIndex((c) => c.id === circuit.id)
+    if (idx < 0) report.circuits.push(cloneCircuit(circuit))
+    else report.circuits[idx] = cloneCircuit(circuit)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 删除电路图 */
+  function removeCircuit(reportId: string, circuitId: string) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report || !Array.isArray(report.circuits)) return
+    const idx = report.circuits.findIndex((c) => c.id === circuitId)
+    if (idx < 0) return
+    report.circuits.splice(idx, 1)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
   /** 从快照完整恢复报告数据（撤销/重做） */
   function restoreSnapshot(
     reportId: string,
@@ -192,6 +223,7 @@ export const useReportsStore = defineStore('reports', () => {
       title: string
       values: Record<string, string>
       tables: TableData[]
+      circuits?: CircuitData[]
     },
   ) {
     const report = reports.value.find((r) => r.id === reportId)
@@ -199,6 +231,7 @@ export const useReportsStore = defineStore('reports', () => {
     report.title = snapshot.title
     report.values = { ...snapshot.values }
     report.tables = (snapshot.tables || []).map(cloneTable)
+    report.circuits = (snapshot.circuits || []).map(cloneCircuit)
     report.updatedAt = new Date().toISOString()
     reports.value = [...reports.value]
     save()
@@ -225,6 +258,11 @@ export const useReportsStore = defineStore('reports', () => {
         tables: Array.isArray(obj.tables)
           ? (obj.tables as TableData[]).map(cloneTable)
           : [],
+        circuits: Array.isArray(obj.circuits)
+          ? (obj.circuits as CircuitData[])
+              .filter((c) => c && Array.isArray(c.elements))
+              .map(cloneCircuit)
+          : [],
       }
       reports.value.unshift(report)
       count++
@@ -249,6 +287,8 @@ export const useReportsStore = defineStore('reports', () => {
     addTable,
     updateTable,
     removeTable,
+    upsertCircuit,
+    removeCircuit,
     restoreSnapshot,
     importReports,
     exportJson,

@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { FieldDef, FormTemplate, ReportData, TableData } from '@/types'
+import type { CircuitData, FieldDef, FormTemplate, ReportData, TableData } from '@/types'
 import { PAGE_SIZE_PT } from '@/types'
 import { splitExperimentContent } from '@/lib/textLayout'
 import TableOverlay from '@/components/TableOverlay.vue'
+import CircuitOverlay from '@/components/CircuitOverlay.vue'
+import { circuitObstacles } from '@/lib/circuit'
 
 const props = defineProps<{
   page: number
@@ -19,6 +21,9 @@ const emit = defineEmits<{
   (e: 'update:table', table: TableData): void
   (e: 'remove:table', tableId: string): void
   (e: 'open:insert-table', page: number): void
+  (e: 'update:circuit', circuit: CircuitData): void
+  (e: 'remove:circuit', circuitId: string): void
+  (e: 'edit:circuit', circuitId: string): void
   (e: 'gesture-start'): void
   (e: 'gesture-end'): void
 }>()
@@ -56,6 +61,7 @@ const experimentSplit = computed(() => {
     675.1,
     16,
     props.data.tables || [],
+    circuitObstacles(props.data.circuits),
   )
 })
 
@@ -67,6 +73,10 @@ const continuationText = computed(() => {
 
 const pageTables = computed<TableData[]>(() =>
   (props.data.tables || []).filter((t) => t.page === props.page),
+)
+
+const pageCircuits = computed<CircuitData[]>(() =>
+  (props.data.circuits || []).filter((c) => c.page === props.page),
 )
 
 function onUpdateTable(table: TableData) {
@@ -97,9 +107,24 @@ const pageSpacers = computed<TableSpacer[]>(() => {
   // 每侧记录已占用到的底部（相对内容区顶部），用零宽“推块”把浮动推到表格的 y
   const bottom: Record<'left' | 'right', number> = { left: 0, right: 0 }
 
-  for (const t of [...pageTables.value].sort((a, b) => a.y - b.y)) {
-    const tW = t.colWidths.reduce((a, b) => a + b, 0)
-    const tH = t.rowHeights.reduce((a, b) => a + b, 0)
+  // 表格与电路图统一作为避让障碍
+  const obstacles = [
+    ...pageTables.value.map((t) => ({
+      id: t.id,
+      x: t.x,
+      y: t.y,
+      w: t.colWidths.reduce((a, b) => a + b, 0),
+      h: t.rowHeights.reduce((a, b) => a + b, 0),
+    })),
+    ...circuitObstacles(pageCircuits.value).map((o, i) => ({
+      ...o,
+      id: pageCircuits.value[i]!.id,
+    })),
+  ]
+
+  for (const t of obstacles.sort((a, b) => a.y - b.y)) {
+    const tW = t.w
+    const tH = t.h
     const relLeft = Math.max(0, t.x - contentLeft)
     const relRight = Math.max(0, contentWidth - relLeft - tW)
     const side: 'left' | 'right' = relLeft <= relRight ? 'left' : 'right'
@@ -397,6 +422,19 @@ function onEditorPaste(e: ClipboardEvent) {
       :editable="editable"
       @update="onUpdateTable"
       @remove="onRemoveTable"
+      @gesture-start="emit('gesture-start')"
+      @gesture-end="emit('gesture-end')"
+    />
+
+    <!-- 浮动电路图 -->
+    <CircuitOverlay
+      v-for="c in pageCircuits"
+      :key="'circuit-' + c.id"
+      :circuit="c"
+      :editable="editable"
+      @update="emit('update:circuit', $event)"
+      @remove="emit('remove:circuit', $event)"
+      @edit="emit('edit:circuit', $event)"
       @gesture-start="emit('gesture-start')"
       @gesture-end="emit('gesture-end')"
     />

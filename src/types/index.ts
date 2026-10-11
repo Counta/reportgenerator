@@ -47,6 +47,37 @@ export interface ReportData {
   values: Record<string, string>
   /** 「实验内容」区域插入的表格（浮动层） */
   tables?: TableData[]
+  /** 「实验内容」区域插入的电路图（浮动层，可再次编辑） */
+  circuits?: CircuitData[]
+}
+
+/** 电路图中的一个元件 / 导线（坐标为电路图内部单位，网格 10） */
+export interface CircuitElement {
+  id: string
+  /** 元件类型，见 lib/circuit.ts COMPONENTS */
+  kind: string
+  /** 双端元件：起点；单点元件：锚点 */
+  x1: number
+  y1: number
+  /** 双端元件：终点（单点元件与起点相同） */
+  x2: number
+  y2: number
+  /** 单点元件旋转角度：0/90/180/270 */
+  rot?: number
+  /** 标签，如 R1、10kΩ */
+  label?: string
+}
+
+/** 插入到报告中的电路图 */
+export interface CircuitData {
+  id: string
+  page: number
+  /** 左上角（PDF 点） */
+  x: number
+  y: number
+  /** 显示宽度（PDF 点）；高度按内容宽高比计算，保持形状不变 */
+  w: number
+  elements: CircuitElement[]
 }
 
 /** 实验内容中插入的表格 */

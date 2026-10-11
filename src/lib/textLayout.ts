@@ -33,6 +33,15 @@ export interface ExperimentContentSplit {
   page2HasTable: boolean
 }
 
+/** 额外避让矩形（如电路图），PDF 点 */
+export interface ObstacleRect {
+  page: number
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 interface Interval {
   left: number
   right: number
@@ -98,6 +107,7 @@ function carveTextLineSlots(
 function layoutPageWithPretext(
   prep: ReturnType<typeof prepareWithSegments>,
   tables: TableData[],
+  extra: ObstacleRect[],
   page: number,
   bounds: { x: number; y: number; w: number; h: number },
   lineH: number,
@@ -110,6 +120,9 @@ function layoutPageWithPretext(
     width: t.colWidths.reduce((a, b) => a + b, 0),
     height: t.rowHeights.reduce((a, b) => a + b, 0),
   }))
+  for (const o of extra) {
+    if (o.page === page) rects.push({ x: o.x, y: o.y, width: o.w, height: o.h })
+  }
 
   const baseInterval: Interval = {
     left: bounds.x,
@@ -178,6 +191,7 @@ export function splitExperimentContent(
   maxWidthPt = 675.1,
   fontSizePt = 16,
   tables: TableData[] = [],
+  extra: ObstacleRect[] = [],
 ): ExperimentContentSplit {
   if (!fullText || fullText.trim() === '') {
     const emptyLayout: ExperimentContentLayout = {
@@ -208,6 +222,7 @@ export function splitExperimentContent(
   const p1Res = layoutPageWithPretext(
     prep,
     tables,
+    extra,
     1,
     p1Bounds,
     p1LineH,
@@ -222,6 +237,7 @@ export function splitExperimentContent(
     : layoutPageWithPretext(
         prep,
         tables,
+        extra,
         2,
         p2Bounds,
         p2LineH,

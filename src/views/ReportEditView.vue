@@ -3,10 +3,12 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageEditor from '@/components/PageEditor.vue'
 import InsertTableModal from '@/components/InsertTableModal.vue'
+import CircuitEditorModal from '@/components/CircuitEditorModal.vue'
+import { circuitBBox, cloneCircuit } from '@/lib/circuit'
 import { formTemplate, CONTENT_REGION } from '@/lib/formTemplate'
 import { exportPage } from '@/lib/exporter'
 import { useReportsStore } from '@/stores/reports'
-import type { ReportData, TableData } from '@/types'
+import type { CircuitData, CircuitElement, ReportData, TableData } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -39,6 +41,7 @@ interface HistorySnapshot {
   title: string
   values: Record<string, string>
   tables: TableData[]
+  circuits: CircuitData[]
 }
 
 function cloneSnapshot(r: ReportData): HistorySnapshot {
@@ -51,6 +54,7 @@ function cloneSnapshot(r: ReportData): HistorySnapshot {
       rowHeights: [...t.rowHeights],
       cells: t.cells.map((row) => [...row]),
     })),
+    circuits: (r.circuits || []).map(cloneCircuit),
   }
 }
 
@@ -62,6 +66,7 @@ function snapshotsEqual(a: HistorySnapshot, b: HistorySnapshot): boolean {
   for (const k of aKeys) {
     if (a.values[k] !== b.values[k]) return false
   }
+  if (JSON.stringify(a.circuits) !== JSON.stringify(b.circuits)) return false
   if (a.tables.length !== b.tables.length) return false
   for (let i = 0; i < a.tables.length; i++) {
     const tA = a.tables[i]
@@ -192,6 +197,8 @@ function redo() {
 
 function onKeydown(e: KeyboardEvent) {
   if (e.isComposing || e.keyCode === 229) return
+  // 电路图弹窗有自己的撤销栈
+  if (isCircuitModalOpen.value) return
 
   const isMod = e.ctrlKey || e.metaKey
   if (!isMod) return
@@ -397,6 +404,75 @@ function onConfirmInsertTable(payload: {
 
   activeTableId.value = newTable.id
   store.addTable(report.value.id, newTable)
+}
+
+// ================= 电路图 =================
+const isCircuitModalOpen = ref(false)
+const editingCircuitId = ref<string | null>(null)
+const circuitModalElements = ref<CircuitElement[]>([])
+const circuitModalPage = ref(1)
+
+function onOpenCircuitEditor(page = 1) {
+  editingCircuitId.value = null
+  circuitModalElements.value = []
+  circuitModalPage.value = page
+  isCircuitModalOpen.value = true
+}
+
+function onEditCircuit(circuitId: string) {
+  const c = report.value?.circuits?.find((x) => x.id === circuitId)
+  if (!c) return
+  editingCircuitId.value = c.id
+  circuitModalElements.value = c.elements.map((e) => ({ ...e }))
+  circuitModalPage.value = c.page
+  isCircuitModalOpen.value = true
+}
+
+/** 电路图内部单位 -> PDF 点 的默认比例（新插入时） */
+const CIRCUIT_PT_PER_UNIT = 0.6
+
+function onConfirmCircuit(payload: { elements: CircuitElement[]; page: number }) {
+  if (!report.value) return
+  recordDiscreteAction()
+  const b = circuitBBox(payload.elements)
+  const existing = editingCircuitId.value
+    ? report.value.circuits?.find((c) => c.id === editingCircuitId.value)
+    : undefined
+
+  if (existing) {
+    // 再次编辑：保持原有缩放比例（每单位的点数），位置不变
+    const oldScale = existing.w / circuitBBox(existing.elements).w
+    const region = existing.page === 1 ? CONTENT_REGION.page1 : CONTENT_REGION.page2
+    const w = Math.min(b.w * oldScale, region.x + region.w - existing.x)
+    store.upsertCircuit(report.value.id, { ...existing, w, elements: payload.elements })
+    return
+  }
+
+  const page = payload.page
+  const region = page === 1 ? CONTENT_REGION.page1 : CONTENT_REGION.page2
+  const scale = Math.min(CIRCUIT_PT_PER_UNIT, (region.w - 40) / b.w, (region.h - 40) / b.h)
+  const w = Math.round(b.w * scale)
+  const circuit: CircuitData = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    page,
+    x: Math.round(region.x + (region.w - w) / 2),
+    y: Math.round(region.y + 24),
+    w,
+    elements: payload.elements,
+  }
+  store.upsertCircuit(report.value.id, circuit)
+}
+
+function onUpdateCircuit(circuit: CircuitData) {
+  if (!report.value) return
+  if (!isGestureActive) recordDiscreteAction()
+  store.upsertCircuit(report.value.id, circuit)
+}
+
+function onRemoveCircuit(circuitId: string) {
+  if (!report.value) return
+  recordDiscreteAction()
+  store.removeCircuit(report.value.id, circuitId)
 }
 
 function onUpdateField(fieldId: string, value: string) {
@@ -633,7 +709,7 @@ function goBack() {
           :class="{ active: (report?.values['courseType'] || '模拟电路') === '模拟电路' }"
           @click="onUpdateField('courseType', '模拟电路')"
         >
-          模拟电路
+          模电
         </button>
         <button
           type="button"
@@ -641,7 +717,7 @@ function goBack() {
           :class="{ active: report?.values['courseType'] === '数字电路' }"
           @click="onUpdateField('courseType', '数字电路')"
         >
-          数字电路
+          数电
         </button>
       </div>
       <div class="actions">
@@ -665,6 +741,26 @@ function goBack() {
             <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
           </svg>
           <span>插入表格</span>
+        </button>
+        <button
+          type="button"
+          class="ghost table-shortcut-btn"
+          title="绘制电路图并插入实验内容"
+          @click="onOpenCircuitEditor(1)"
+        >
+          <svg
+            class="action-svg"
+            viewBox="0 0 24 24"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M2 12h4l2-4 3 8 3-8 2 4h6" />
+          </svg>
+          <span>插入电路图</span>
         </button>
         <button class="primary" :disabled="exporting" @click="exportAll">
           {{ exporting ? '导出中…' : '导出图片' }}
@@ -693,6 +789,9 @@ function goBack() {
               @update:table="onUpdateTable"
               @remove:table="onRemoveTable"
               @open:insert-table="onOpenInsertTable"
+              @update:circuit="onUpdateCircuit"
+              @remove:circuit="onRemoveCircuit"
+              @edit:circuit="onEditCircuit"
               @gesture-start="onGestureStart"
               @gesture-end="onGestureEnd"
             />
@@ -705,6 +804,14 @@ function goBack() {
       v-model:visible="isInsertModalOpen"
       :default-page="insertModalDefaultPage"
       @confirm="onConfirmInsertTable"
+    />
+
+    <CircuitEditorModal
+      v-model:visible="isCircuitModalOpen"
+      :elements="circuitModalElements"
+      :editing="editingCircuitId !== null"
+      :default-page="circuitModalPage"
+      @confirm="onConfirmCircuit"
     />
   </div>
 </template>

@@ -1,6 +1,7 @@
 import { PAGE_SIZE_PT } from '@/types'
 import type { FormTemplate, ReportData, TableData } from '@/types'
 import { splitExperimentContent, calcCellFontSizePt } from '@/lib/textLayout'
+import { circuitDataUrl, circuitDisplayHeight, circuitObstacles } from '@/lib/circuit'
 
 /**
  * 逐页导出：将背景图与填写内容合成为 PNG。
@@ -286,6 +287,7 @@ export async function exportPage(
     675.1,
     16,
     data.tables || [],
+    circuitObstacles(data.circuits),
   )
 
   for (const f of template.fields) {
@@ -331,6 +333,16 @@ export async function exportPage(
         drawTable(ctx, t, dpi)
       }
     }
+  }
+
+  // 绘制属于该页的电路图（SVG 矢量 -> 位图，白底遮挡横线）
+  for (const c of data.circuits || []) {
+    if (c.page !== page) continue
+    const h = circuitDisplayHeight(c)
+    const cimg = await loadImage(circuitDataUrl(c.elements))
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(px(c.x, dpi), px(c.y, dpi), px(c.w, dpi), px(h, dpi))
+    ctx.drawImage(cimg, px(c.x, dpi), px(c.y, dpi), px(c.w, dpi), px(h, dpi))
   }
 
   return { dataUrl: canvas.toDataURL('image/png'), width: outW, height: outH }
