@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { FieldDef, FormTemplate, ReportData, TableData } from '@/types'
 import { PAGE_SIZE_PT } from '@/types'
 import { splitExperimentContent } from '@/lib/textLayout'
@@ -23,7 +23,6 @@ const emit = defineEmits<{
   (e: 'gesture-end'): void
 }>()
 
-/** 页面尺寸（点）换算为百分比定位 */
 const PW = PAGE_SIZE_PT.width
 const PH = PAGE_SIZE_PT.height
 
@@ -39,7 +38,6 @@ interface Pos {
   height: string
 }
 
-/** 该页需要渲染的字段及其定位 */
 const positions = computed<Pos[]>(() =>
   props.template.fields
     .filter((f) => f.page === props.page)
@@ -52,25 +50,21 @@ const positions = computed<Pos[]>(() =>
     })),
 )
 
-/** 实验内容分页拆分状态 */
 const experimentSplit = computed(() => {
-  return splitExperimentContent(props.data.values['content'] || '')
+  return splitExperimentContent(
+    props.data.values['content'] || '',
+    675.1,
+    16,
+    props.data.tables || [],
+  )
 })
 
-/** 第 2 页接续区显示文本 */
 const continuationText = computed(() => {
   return experimentSplit.value.isOverflow
     ? experimentSplit.value.page2Lines.join('\n')
     : ''
 })
 
-function onContinuationInput(val: string) {
-  const p1Text = experimentSplit.value.page1Lines.join('\n')
-  const combined = p1Text + (val ? '\n' + val : '')
-  emit('update:field', 'content', combined)
-}
-
-/** 本页的表格 */
 const pageTables = computed<TableData[]>(() =>
   (props.data.tables || []).filter((t) => t.page === props.page),
 )
@@ -83,7 +77,131 @@ function onRemoveTable(tableId: string) {
   emit('remove:table', tableId)
 }
 
+// ================= 单一整体输入框与浮动避让 =================
+interface TableSpacer {
+  id: string
+  style: Record<string, string>
+}
+
+// PDF 点 -> 页面相对单位（.page-editor 是 inline-size 容器）
+function pt(n: number): string {
+  return `calc(${n} * 100cqw / ${PW})`
+}
+
+const pageSpacers = computed<TableSpacer[]>(() => {
+  const contentTop = props.page === 1 ? 558 : 98
+  const contentWidth = 675.1
+  const contentLeft = 91.7
+  const gap = 6
+  const out: TableSpacer[] = []
+  // 每侧记录已占用到的底部（相对内容区顶部），用零宽“推块”把浮动推到表格的 y
+  const bottom: Record<'left' | 'right', number> = { left: 0, right: 0 }
+
+  for (const t of [...pageTables.value].sort((a, b) => a.y - b.y)) {
+    const tW = t.colWidths.reduce((a, b) => a + b, 0)
+    const tH = t.rowHeights.reduce((a, b) => a + b, 0)
+    const relLeft = Math.max(0, t.x - contentLeft)
+    const relRight = Math.max(0, contentWidth - relLeft - tW)
+    const side: 'left' | 'right' = relLeft <= relRight ? 'left' : 'right'
+    const top = Math.max(0, t.y - contentTop - gap)
+    const push = Math.max(0, top - bottom[side])
+    const width = (side === 'left' ? relLeft : relRight) + tW + gap
+    const height = tH + gap * 2
+    // 零宽推块：不占水平空间，只把后续同侧浮动推到正确高度
+    out.push({
+      id: `push-${t.id}`,
+      style: { float: side, clear: side, width: '0', height: pt(push) },
+    })
+    out.push({
+      id: `spacer-${t.id}`,
+      style: { float: side, clear: side, width: pt(width), height: pt(height) },
+    })
+    bottom[side] = Math.max(bottom[side], top) + height
+  }
+  return out
+})
+
+const contentEditorRef = ref<HTMLDivElement | null>(null)
+const continuationEditorRef = ref<HTMLDivElement | null>(null)
 let isComposing = false
+
+// 编辑器位于 v-for 内，字符串 ref 会变成数组，因此用函数 ref 并在挂载时初始化内容
+function bindContentEditor(el: unknown) {
+  const node = el instanceof HTMLDivElement ? el : null
+  if (node && node !== contentEditorRef.value) {
+    contentEditorRef.value = node
+    setEditorText(node, props.data.values['content'] || '', true)
+  } else if (!node) contentEditorRef.value = null
+}
+
+function bindContinuationEditor(el: unknown) {
+  const node = el instanceof HTMLDivElement ? el : null
+  if (node && node !== continuationEditorRef.value) {
+    continuationEditorRef.value = node
+    setEditorText(node, continuationText.value || '', true)
+  } else if (!node) continuationEditorRef.value = null
+}
+
+// 编辑器 DOM 完全手动管理（不让 Vue 渲染子节点，避免与输入冲突）
+function getTextFromEditor(el: HTMLElement | null): string {
+  if (!el) return ''
+  let text = ''
+  el.childNodes.forEach((n) => {
+    if (n instanceof HTMLElement && n.classList.contains('table-float-spacer')) return
+    if (n.nodeName === 'BR') text += '\n'
+    else if (n instanceof HTMLElement) {
+      if (text && !text.endsWith('\n')) text += '\n'
+      text += n.innerText
+    } else text += n.textContent ?? ''
+  })
+  return text.replace(/\r/g, '')
+}
+
+function renderSpacers(el: HTMLElement | null) {
+  if (!el) return
+  el.querySelectorAll(':scope > .table-float-spacer').forEach((n) => n.remove())
+  const first = el.firstChild
+  for (const s of pageSpacers.value) {
+    const d = document.createElement('div')
+    d.className = 'table-float-spacer'
+    d.contentEditable = 'false'
+    Object.assign(d.style, s.style)
+    el.insertBefore(d, first)
+  }
+}
+
+function setEditorText(el: HTMLElement | null, text: string, force = false) {
+  if (!el) return
+  if (!force && document.activeElement === el) return
+  if (!force && getTextFromEditor(el) === text) return
+  el.textContent = ''
+  if (text) el.appendChild(document.createTextNode(text))
+  renderSpacers(el)
+}
+
+function activeEditor(): HTMLElement | null {
+  return props.page === 1 ? contentEditorRef.value : continuationEditorRef.value
+}
+
+watch(pageSpacers, () => renderSpacers(activeEditor()), { deep: true })
+
+watch(
+  () => props.data.values['content'],
+  (newVal) => {
+    if (props.page === 1) {
+      setEditorText(contentEditorRef.value, newVal || '')
+    }
+  },
+)
+
+watch(
+  continuationText,
+  (newVal) => {
+    if (props.page === 2) {
+      setEditorText(continuationEditorRef.value, newVal || '')
+    }
+  },
+)
 
 function onCompStart() {
   isComposing = true
@@ -101,16 +219,42 @@ function onInputField(e: Event, fieldId: string) {
   emit('update:field', fieldId, val)
 }
 
-function onCompEndContinuation(e: Event) {
+function onEditorCompEnd(e: Event) {
   isComposing = false
-  const val = (e.target as HTMLTextAreaElement).value
-  onContinuationInput(val)
+  const el = e.target as HTMLElement
+  const val = getTextFromEditor(el)
+  emit('update:field', 'content', val)
 }
 
-function onInputContinuation(e: Event) {
+function onEditorInput(e: Event) {
   if (isComposing) return
-  const val = (e.target as HTMLTextAreaElement).value
-  onContinuationInput(val)
+  const el = e.target as HTMLElement
+  const val = getTextFromEditor(el)
+  emit('update:field', 'content', val)
+}
+
+function onContinuationCompEnd(e: Event) {
+  isComposing = false
+  const el = e.target as HTMLElement
+  const val = getTextFromEditor(el)
+  const p1Text = experimentSplit.value.page1Lines.join('\n')
+  const combined = p1Text + (val ? '\n' + val : '')
+  emit('update:field', 'content', combined)
+}
+
+function onContinuationEditorInput(e: Event) {
+  if (isComposing) return
+  const el = e.target as HTMLElement
+  const val = getTextFromEditor(el)
+  const p1Text = experimentSplit.value.page1Lines.join('\n')
+  const combined = p1Text + (val ? '\n' + val : '')
+  emit('update:field', 'content', combined)
+}
+
+function onEditorPaste(e: ClipboardEvent) {
+  const text = e.clipboardData?.getData('text/plain') || ''
+  if (!text) return
+  document.execCommand('insertText', false, text)
 }
 </script>
 
@@ -133,6 +277,7 @@ function onInputContinuation(e: Event) {
         {{ data.values['courseType'] || '模拟电路' }}
       </div>
 
+      <!-- 第 2 页实验内容接续区：单一整体输入框，连续书写无分界线 -->
       <div
         v-else-if="p.field.id === 'contentContinuation'"
         class="field-box"
@@ -141,6 +286,7 @@ function onInputContinuation(e: Event) {
           v-if="editable"
           type="button"
           class="insert-table-side-btn"
+          title="插入表格"
           @click.stop="emit('open:insert-table', page)"
         >
           <svg
@@ -158,23 +304,24 @@ function onInputContinuation(e: Event) {
           </svg>
         </button>
 
-        <textarea
-          :value="continuationText"
-          class="layer-textarea"
-          :placeholder="
-            experimentSplit.isOverflow
-              ? '实验内容'
-              : ''
-          "
+        <div
+          :ref="bindContinuationEditor"
+          class="unified-content-editor"
+          :contenteditable="editable ? 'plaintext-only' : 'false'"
+          spellcheck="false"
           @compositionstart="onCompStart"
-          @compositionend="onCompEndContinuation"
-          @input="onInputContinuation"
-        />
+          @compositionend="onContinuationCompEnd"
+          @input="onContinuationEditorInput"
+          @paste.prevent="onEditorPaste"
+        >
+        </div>
+
         <span v-if="experimentSplit.isOverflow" class="box-badge">
-          已自动接续自第 1 页（第 23+ 行）
+          已自动接续自第 1 页
         </span>
       </div>
 
+      <!-- 单行输入框 -->
       <input
         v-else-if="p.field.type === 'input'"
         :value="data.values[p.field.id] ?? ''"
@@ -185,11 +332,13 @@ function onInputContinuation(e: Event) {
         @input="onInputField($event, p.field.id)"
       />
 
-      <div v-else class="field-box">
+      <!-- 第 1 页实验内容：单一整体输入框，连续书写无分界线 -->
+      <div v-else-if="p.field.id === 'content'" class="field-box">
         <button
-          v-if="p.field.id === 'content' && editable"
+          v-if="editable"
           type="button"
           class="insert-table-side-btn"
+          title="插入表格"
           @click.stop="emit('open:insert-table', page)"
         >
           <svg
@@ -207,6 +356,28 @@ function onInputContinuation(e: Event) {
           </svg>
         </button>
 
+        <div
+          :ref="bindContentEditor"
+          class="unified-content-editor"
+          :contenteditable="editable ? 'plaintext-only' : 'false'"
+          spellcheck="false"
+          @compositionstart="onCompStart"
+          @compositionend="onEditorCompEnd"
+          @input="onEditorInput"
+          @paste.prevent="onEditorPaste"
+        >
+        </div>
+
+        <span
+          v-if="experimentSplit.isOverflow"
+          class="box-badge warning"
+        >
+          已超出第 1 页容量（超出行自动接续至第 2 页顶部）
+        </span>
+      </div>
+
+      <!-- 其他通用 textarea (如 purpose, equipment, discussion) -->
+      <div v-else class="field-box">
         <textarea
           :value="data.values[p.field.id] ?? ''"
           class="layer-textarea"
@@ -215,15 +386,10 @@ function onInputContinuation(e: Event) {
           @compositionend="onCompEndField($event, p.field.id)"
           @input="onInputField($event, p.field.id)"
         />
-        <span
-          v-if="p.field.id === 'content' && experimentSplit.isOverflow"
-          class="box-badge warning"
-        >
-          已超出第 1 页（第 23 行起已自动接续至第 2 页顶部）
-        </span>
       </div>
     </div>
 
+    <!-- 浮动表格 -->
     <TableOverlay
       v-for="t in pageTables"
       :key="'table-' + t.id"
@@ -241,7 +407,6 @@ function onInputContinuation(e: Event) {
 .page-editor {
   position: relative;
   width: 100%;
-  /* 保持 A3 比例 */
   aspect-ratio: 841.92 / 1190.52;
   background: #fff;
   overflow: hidden;
@@ -334,7 +499,39 @@ function onInputContinuation(e: Event) {
   word-break: break-word;
 }
 
-/* 左侧边表格插入按钮 */
+/* 单一整体输入框：无任何切割分界线，文字自然流淌于横线上 */
+.unified-content-editor {
+  width: 100%;
+  height: 100%;
+  border: none !important;
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+  font-family: 'SimSun', 'Songti SC', 'STSong', 'SimSun-ExtB', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Microsoft YaHei', sans-serif;
+  font-size: calc(16 * 100cqw / 841.92);
+  line-height: calc(545 / 22 * 100cqw / 841.92);
+  color: #000000;
+  padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  cursor: text;
+}
+.unified-content-editor:focus {
+  background: transparent !important;
+}
+
+.table-float-spacer {
+  background: transparent !important;
+  border: none !important;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 左侧边动作按钮 */
 .insert-table-side-btn {
   position: absolute;
   left: -46px;

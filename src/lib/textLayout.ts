@@ -1,90 +1,249 @@
-/**
- * 文本排版与分页拆分工具
- * 用于处理第一页「实验内容」在溢出时，自动续接到第二页「问题讨论」之上
- */
+import {
+  prepareWithSegments,
+  layoutNextLineRange,
+  materializeLineRange,
+  type LayoutCursor,
+} from '@chenglou/pretext'
+import type { TableData } from '@/types'
 
-let offscreenCtx: CanvasRenderingContext2D | null = null
+const FONT_FAMILY = '"SimSun", "Songti SC", "STSong", "SimSun-ExtB", serif'
 
-function getMeasureCtx(): CanvasRenderingContext2D | null {
-  if (typeof document === 'undefined') return null
-  if (!offscreenCtx) {
-    const canvas = document.createElement('canvas')
-    offscreenCtx = canvas.getContext('2d')
-  }
-  return offscreenCtx
+export interface PositionedLine {
+  text: string
+  x: number
+  y: number
+  width: number
+  page: number
 }
 
-/** 估算字符宽度（用于无 canvas 环境的回退） */
-function estimateWidth(str: string, fontSize: number): number {
-  let w = 0
-  for (const ch of str) {
-    w += ch.charCodeAt(0) > 255 ? fontSize : fontSize * 0.55
-  }
-  return w
+export interface ExperimentContentLayout {
+  page1Lines: PositionedLine[]
+  page2Lines: PositionedLine[]
+  hasTablesPage1: boolean
+  hasTablesPage2: boolean
+  isOverflow: boolean
 }
 
-/** 将段落按最大宽度拆分为多行 */
-export function wrapTextLines(
-  text: string,
-  maxWidth: number,
-  fontSize: number,
-): string[] {
-  if (!text) return []
-  const ctx = getMeasureCtx()
-  const measure = ctx
-    ? (s: string) => {
-        ctx.font = `${fontSize}px "SimSun", "Songti SC", "STSong", serif`
-        return ctx.measureText(s).width
-      }
-    : (s: string) => estimateWidth(s, fontSize)
+export interface ExperimentContentSplit {
+  page1Lines: string[]
+  page2Lines: string[]
+  isOverflow: boolean
+  layout: ExperimentContentLayout
+  page1HasTable: boolean
+  page2HasTable: boolean
+}
 
-  const lines: string[] = []
-  for (const para of text.split('\n')) {
-    let line = ''
-    for (const ch of para) {
-      if (line !== '' && measure(line + ch) > maxWidth) {
-        lines.push(line)
-        line = ch
-      } else {
-        line += ch
-      }
+interface Interval {
+  left: number
+  right: number
+}
+
+interface Rect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+const MIN_SLOT_WIDTH = 42
+const OBSTACLE_PAD = 8
+
+function getRectIntervalsForBand(
+  rects: Rect[],
+  bandTop: number,
+  bandBottom: number,
+  hPad: number,
+  vPad: number,
+): Interval[] {
+  const intervals: Interval[] = []
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i]!
+    if (
+      bandBottom <= r.y - vPad ||
+      bandTop >= r.y + r.height + vPad
+    ) {
+      continue
     }
-    lines.push(line)
+    intervals.push({
+      left: r.x - hPad,
+      right: r.x + r.width + hPad,
+    })
   }
-  return lines
+  return intervals
 }
 
-/** 第一页实验内容最大容纳行数（y: 558 -> 1108，高度约 550pt，行距 24pt） */
-export const PAGE1_CONTENT_MAX_LINES = 22
+function carveTextLineSlots(
+  base: Interval,
+  blocked: Interval[],
+  minW = MIN_SLOT_WIDTH,
+): Interval[] {
+  let slots: Interval[] = [base]
+  for (let i = 0; i < blocked.length; i++) {
+    const b = blocked[i]!
+    const next: Interval[] = []
+    for (let j = 0; j < slots.length; j++) {
+      const s = slots[j]!
+      if (b.right <= s.left || b.left >= s.right) {
+        next.push(s)
+        continue
+      }
+      if (b.left > s.left) next.push({ left: s.left, right: b.left })
+      if (b.right < s.right) next.push({ left: b.right, right: s.right })
+    }
+    slots = next
+  }
+  return slots.filter((s) => s.right - s.left >= minW)
+}
 
-/** 第二页接续区最大容纳行数（y: 100 -> 772，高度约 672pt，行距 24pt） */
-export const PAGE2_CONTINUATION_MAX_LINES = 28
+function layoutPageWithPretext(
+  prep: ReturnType<typeof prepareWithSegments>,
+  tables: TableData[],
+  page: number,
+  bounds: { x: number; y: number; w: number; h: number },
+  lineH: number,
+  startCursor: LayoutCursor,
+): { lines: PositionedLine[]; nextCursor: LayoutCursor; finished: boolean } {
+  const pageTables = tables.filter((t) => t.page === page)
+  const rects: Rect[] = pageTables.map((t) => ({
+    x: t.x,
+    y: t.y,
+    width: t.colWidths.reduce((a, b) => a + b, 0),
+    height: t.rowHeights.reduce((a, b) => a + b, 0),
+  }))
 
-/**
- * 拆分实验内容：
- * 将 fullText 分割为第 1 页内容行和第 2 页续接行
- */
+  const baseInterval: Interval = {
+    left: bounds.x,
+    right: bounds.x + bounds.w,
+  }
+
+  const lines: PositionedLine[] = []
+  let cursor = startCursor
+  let lineTop = bounds.y
+  let finished = false
+
+  while (lineTop + lineH <= bounds.y + bounds.h + 2) {
+    const bandTop = lineTop
+    const bandBottom = lineTop + lineH
+
+    const blocked = getRectIntervalsForBand(
+      rects,
+      bandTop,
+      bandBottom,
+      OBSTACLE_PAD,
+      4,
+    )
+
+    const slots = carveTextLineSlots(baseInterval, blocked)
+    if (slots.length === 0) {
+      lineTop += lineH
+      continue
+    }
+
+    let filledAny = false
+    for (const slot of slots) {
+      const slotWidth = slot.right - slot.left
+      const range = layoutNextLineRange(prep, cursor, slotWidth)
+      if (range === null) {
+        finished = true
+        break
+      }
+
+      const materialized = materializeLineRange(prep, range)
+      lines.push({
+        text: materialized.text,
+        x: slot.left,
+        y: lineTop,
+        width: materialized.width,
+        page,
+      })
+
+      cursor = range.end
+      filledAny = true
+    }
+
+    if (finished) break
+    if (!filledAny) {
+      lineTop += lineH
+      continue
+    }
+
+    lineTop += lineH
+  }
+
+  return { lines, nextCursor: cursor, finished }
+}
+
 export function splitExperimentContent(
   fullText: string,
   maxWidthPt = 675.1,
   fontSizePt = 16,
-): {
-  page1Lines: string[]
-  page2Lines: string[]
-  isOverflow: boolean
-} {
-  if (!fullText) {
-    return { page1Lines: [], page2Lines: [], isOverflow: false }
+  tables: TableData[] = [],
+): ExperimentContentSplit {
+  if (!fullText || fullText.trim() === '') {
+    const emptyLayout: ExperimentContentLayout = {
+      page1Lines: [],
+      page2Lines: [],
+      hasTablesPage1: tables.some((t) => t.page === 1),
+      hasTablesPage2: tables.some((t) => t.page === 2),
+      isOverflow: false,
+    }
+    return {
+      page1Lines: [],
+      page2Lines: [],
+      isOverflow: false,
+      layout: emptyLayout,
+      page1HasTable: emptyLayout.hasTablesPage1,
+      page2HasTable: emptyLayout.hasTablesPage2,
+    }
   }
 
-  const lines = wrapTextLines(fullText, maxWidthPt, fontSizePt)
-  const page1Lines = lines.slice(0, PAGE1_CONTENT_MAX_LINES)
-  const page2Lines = lines.slice(PAGE1_CONTENT_MAX_LINES)
+  const font = `${fontSizePt}px ${FONT_FAMILY}`
+  const prep = prepareWithSegments(fullText, font, {
+    whiteSpace: 'pre-wrap',
+  })
+
+  const p1Bounds = { x: 91.7, y: 558, w: maxWidthPt, h: 545 }
+  const p1LineH = 545 / 22
+
+  const p1Res = layoutPageWithPretext(
+    prep,
+    tables,
+    1,
+    p1Bounds,
+    p1LineH,
+    { segmentIndex: 0, graphemeIndex: 0 },
+  )
+
+  const p2Bounds = { x: 91.7, y: 98, w: maxWidthPt, h: 680 }
+  const p2LineH = 680 / 28
+
+  const p2Res = p1Res.finished
+    ? { lines: [], nextCursor: p1Res.nextCursor, finished: true }
+    : layoutPageWithPretext(
+        prep,
+        tables,
+        2,
+        p2Bounds,
+        p2LineH,
+        p1Res.nextCursor,
+      )
+
+  const isOverflow = !p1Res.finished && p2Res.lines.length > 0
+  const layout: ExperimentContentLayout = {
+    page1Lines: p1Res.lines,
+    page2Lines: p2Res.lines,
+    hasTablesPage1: tables.some((t) => t.page === 1),
+    hasTablesPage2: tables.some((t) => t.page === 2),
+    isOverflow,
+  }
 
   return {
-    page1Lines,
-    page2Lines,
-    isOverflow: page2Lines.length > 0,
+    page1Lines: p1Res.lines.map((l) => l.text),
+    page2Lines: p2Res.lines.map((l) => l.text),
+    isOverflow,
+    layout,
+    page1HasTable: layout.hasTablesPage1,
+    page2HasTable: layout.hasTablesPage2,
   }
 }
 

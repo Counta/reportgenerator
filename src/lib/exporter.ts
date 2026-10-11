@@ -281,22 +281,46 @@ export async function exportPage(
   // 绘制背景图（缩放到输出尺寸）
   ctx.drawImage(img, 0, 0, outW, outH)
 
-  const split = splitExperimentContent(data.values['content'] || '')
+  const split = splitExperimentContent(
+    data.values['content'] || '',
+    675.1,
+    16,
+    data.tables || [],
+  )
 
   for (const f of template.fields) {
     if (f.page !== page) continue
 
-    let value = data.values[f.id] ?? ''
-
-    // 第 1 页实验内容：只绘制未溢出的前 22 行
     if (f.id === 'content') {
-      value = split.page1Lines.join('\n')
-    }
-    // 第 2 页实验内容接续区：只有在第 1 页溢出时才绘制第 23+ 行
-    else if (f.id === 'contentContinuation') {
-      value = split.isOverflow ? split.page2Lines.join('\n') : ''
+      const lines = split.layout.page1Lines
+      const fontSize = dpi * 16
+      ctx.font = `${fontSize}px ${FONT_FAMILY}`
+      ctx.fillStyle = '#000'
+      ctx.textBaseline = 'top'
+      ctx.textAlign = 'left'
+      for (const line of lines) {
+        if (!line.text) continue
+        ctx.fillText(line.text, px(line.x, dpi), px(line.y, dpi))
+      }
+      continue
     }
 
+    if (f.id === 'contentContinuation') {
+      if (!split.isOverflow) continue
+      const lines = split.layout.page2Lines
+      const fontSize = dpi * 16
+      ctx.font = `${fontSize}px ${FONT_FAMILY}`
+      ctx.fillStyle = '#000'
+      ctx.textBaseline = 'top'
+      ctx.textAlign = 'left'
+      for (const line of lines) {
+        if (!line.text) continue
+        ctx.fillText(line.text, px(line.x, dpi), px(line.y, dpi))
+      }
+      continue
+    }
+
+    const value = data.values[f.id] ?? ''
     drawField(ctx, value, f.rect, dpi, f.id)
   }
 
