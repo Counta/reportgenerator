@@ -257,6 +257,8 @@ function onKeydown(e: KeyboardEvent) {
   inset: 0;
   z-index: 100;
   background: rgba(17, 24, 39, 0.45);
+  /* 阻止原生捏合缩放：弹窗始终保持原尺寸 */
+  touch-action: pan-y;
   backdrop-filter: blur(2px);
   display: flex;
   align-items: center;

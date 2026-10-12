@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { CircuitData, FieldDef, FormTemplate, ReportData, TableData } from '@/types'
+import type { CircuitData, FieldDef, FormTemplate, ImageData, ReportData, TableData } from '@/types'
 import { PAGE_SIZE_PT } from '@/types'
 import { splitExperimentContent } from '@/lib/textLayout'
 import TableOverlay from '@/components/TableOverlay.vue'
 import CircuitOverlay from '@/components/CircuitOverlay.vue'
+import ImageOverlay from '@/components/ImageOverlay.vue'
 import { circuitObstacles } from '@/lib/circuit'
+import { imageObstacles } from '@/lib/image'
 
 const props = defineProps<{
   page: number
@@ -24,6 +26,10 @@ const emit = defineEmits<{
   (e: 'update:circuit', circuit: CircuitData): void
   (e: 'remove:circuit', circuitId: string): void
   (e: 'edit:circuit', circuitId: string): void
+  (e: 'update:image', image: ImageData): void
+  (e: 'remove:image', imageId: string): void
+  (e: 'edit:image', imageId: string): void
+  (e: 'open:insert-image', page: number): void
   (e: 'gesture-start'): void
   (e: 'gesture-end'): void
 }>()
@@ -61,7 +67,7 @@ const experimentSplit = computed(() => {
     675.1,
     16,
     props.data.tables || [],
-    circuitObstacles(props.data.circuits),
+    [...circuitObstacles(props.data.circuits), ...imageObstacles(props.data.images)],
   )
 })
 
@@ -77,6 +83,10 @@ const pageTables = computed<TableData[]>(() =>
 
 const pageCircuits = computed<CircuitData[]>(() =>
   (props.data.circuits || []).filter((c) => c.page === props.page),
+)
+
+const pageImages = computed<ImageData[]>(() =>
+  (props.data.images || []).filter((i) => i.page === props.page),
 )
 
 function onUpdateTable(table: TableData) {
@@ -107,7 +117,7 @@ const pageSpacers = computed<TableSpacer[]>(() => {
   // 每侧记录已占用到的底部（相对内容区顶部），用零宽“推块”把浮动推到表格的 y
   const bottom: Record<'left' | 'right', number> = { left: 0, right: 0 }
 
-  // 表格与电路图统一作为避让障碍
+  // 表格、电路图与图片统一作为避让障碍
   const obstacles = [
     ...pageTables.value.map((t) => ({
       id: t.id,
@@ -119,6 +129,10 @@ const pageSpacers = computed<TableSpacer[]>(() => {
     ...circuitObstacles(pageCircuits.value).map((o, i) => ({
       ...o,
       id: pageCircuits.value[i]!.id,
+    })),
+    ...imageObstacles(pageImages.value).map((o, i) => ({
+      ...o,
+      id: pageImages.value[i]!.id,
     })),
   ]
 
@@ -329,6 +343,31 @@ function onEditorPaste(e: ClipboardEvent) {
           </svg>
         </button>
 
+        <button
+          v-if="editable"
+          type="button"
+          class="insert-table-side-btn"
+          title="插入图片"
+          @click.stop="emit('open:insert-image', page)"
+        >
+          <svg
+            class="side-btn-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+        </button>
+
         <div
           :ref="bindContinuationEditor"
           class="unified-content-editor"
@@ -378,6 +417,31 @@ function onEditorPaste(e: ClipboardEvent) {
           >
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+          </svg>
+        </button>
+
+        <button
+          v-if="editable"
+          type="button"
+          class="insert-table-side-btn"
+          title="插入图片"
+          @click.stop="emit('open:insert-image', page)"
+        >
+          <svg
+            class="side-btn-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
           </svg>
         </button>
 
@@ -435,6 +499,19 @@ function onEditorPaste(e: ClipboardEvent) {
       @update="emit('update:circuit', $event)"
       @remove="emit('remove:circuit', $event)"
       @edit="emit('edit:circuit', $event)"
+      @gesture-start="emit('gesture-start')"
+      @gesture-end="emit('gesture-end')"
+    />
+
+    <!-- 浮动图片 -->
+    <ImageOverlay
+      v-for="img in pageImages"
+      :key="'image-' + img.id"
+      :image="img"
+      :editable="editable"
+      @update="emit('update:image', $event)"
+      @remove="emit('remove:image', $event)"
+      @edit="emit('edit:image', $event)"
       @gesture-start="emit('gesture-start')"
       @gesture-end="emit('gesture-end')"
     />
@@ -597,5 +674,10 @@ function onEditorPaste(e: ClipboardEvent) {
   border-color: #2563eb;
   transform: scale(1.06);
   box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+}
+
+/* 同框内第二个侧边按钮（图片）下移到首按钮下方 */
+.insert-table-side-btn + .insert-table-side-btn {
+  top: 44px;
 }
 </style>

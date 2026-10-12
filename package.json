@@ -12,6 +12,7 @@
     "@chenglou/pretext": "^0.0.9",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^2.2.6",
+    "pnpm": "^12.11.2",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },

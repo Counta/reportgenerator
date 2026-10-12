@@ -48,6 +48,57 @@ const svgRef = ref<SVGSVGElement | null>(null)
 const cardRef = ref<HTMLDivElement | null>(null)
 const hover = ref<[number, number] | null>(null)
 
+// ===== 触摸屏：双指捏合缩放画布（仅绘图区，工具栏不缩放） =====
+const canvasZoom = ref(1)
+const canvasWrapRef = ref<HTMLElement | null>(null)
+
+let canvasPinch: { dist: number; zoom: number; cx: number; cy: number } | null = null
+
+function onCanvasTouchStart(e: TouchEvent) {
+  if (e.touches.length !== 2) return
+  const svg = svgRef.value
+  if (!svg) return
+  const a = e.touches[0]
+  const b = e.touches[1]
+  const midX = (a.clientX + b.clientX) / 2
+  const midY = (a.clientY + b.clientY) / 2
+  const rect = svg.getBoundingClientRect()
+  canvasPinch = {
+    dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+    zoom: canvasZoom.value,
+    cx: (midX - rect.left) / canvasZoom.value,
+    cy: (midY - rect.top) / canvasZoom.value,
+  }
+  // 双指落下：回滚进行中的单指拖拽，避免误放/误移元件
+  window.dispatchEvent(new PointerEvent('pointercancel'))
+  e.preventDefault()
+}
+
+function onCanvasTouchMove(e: TouchEvent) {
+  if (!canvasPinch || e.touches.length < 2) return
+  const wrap = canvasWrapRef.value
+  const svg = svgRef.value
+  if (!wrap || !svg) return
+  const a = e.touches[0]
+  const b = e.touches[1]
+  const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+  const zoom = Math.min(4, Math.max(0.25, canvasPinch.zoom * (dist / canvasPinch.dist)))
+  canvasZoom.value = zoom
+  // 同步改属性保证布局立即更新，滚动锚点计算才准确
+  svg.setAttribute('width', String(CANVAS_W * zoom))
+  svg.setAttribute('height', String(CANVAS_H * zoom))
+  const midX = (a.clientX + b.clientX) / 2
+  const midY = (a.clientY + b.clientY) / 2
+  const rect = svg.getBoundingClientRect()
+  wrap.scrollLeft += rect.left - (midX - canvasPinch.cx * zoom)
+  wrap.scrollTop += rect.top - (midY - canvasPinch.cy * zoom)
+  e.preventDefault()
+}
+
+function onCanvasTouchEnd(e: TouchEvent) {
+  if (e.touches.length < 2) canvasPinch = null
+}
+
 const groups = computed(() => {
   const map = new Map<string, typeof COMPONENTS>()
   for (const c of COMPONENTS) {
@@ -122,7 +173,7 @@ function orthogonal(x1: number, y1: number, x: number, y: number): [number, numb
 type Drag =
   | { type: 'create'; id: string }
   | { type: 'move'; id: string; start: [number, number]; orig: CircuitElement; moved: boolean }
-  | { type: 'end'; id: string; which: 1 | 2 }
+  | { type: 'end'; id: string; which: 1 | 2; orig: CircuitElement }
 
 let drag: Drag | null = null
 let pendingSnapshot: CircuitElement[] | null = null
@@ -142,6 +193,8 @@ function commitChange() {
 
 function onCanvasDown(e: PointerEvent) {
   if (e.button !== 0) return
+  // 触摸时忽略非主手指，避免双指操作误触画布
+  if (e.pointerType === 'touch' && !e.isPrimary) return
   const [x, y] = clampPt(...toCanvas(e))
   if (tool.value === 'select') {
     selectedId.value = null
@@ -170,7 +223,7 @@ function onCanvasDown(e: PointerEvent) {
   }
   els.value.push(el)
   selectedId.value = el.id
-  if (def.mode === 'line') {
+  if (def.mode === 'line' || e.pointerType === 'touch') {
     drag = { type: 'create', id: el.id }
     startWindowDrag()
   } else {
@@ -188,6 +241,7 @@ function nextLabel(base: string): string {
 
 function onElementDown(e: PointerEvent, el: CircuitElement) {
   if (tool.value !== 'select' || e.button !== 0) return
+  if (e.pointerType === 'touch' && !e.isPrimary) return
   e.stopPropagation()
   selectedId.value = el.id
   beginChange()
@@ -197,9 +251,10 @@ function onElementDown(e: PointerEvent, el: CircuitElement) {
 
 function onHandleDown(e: PointerEvent, el: CircuitElement, which: 1 | 2) {
   if (e.button !== 0) return
+  if (e.pointerType === 'touch' && !e.isPrimary) return
   e.stopPropagation()
   beginChange()
-  drag = { type: 'end', id: el.id, which }
+  drag = { type: 'end', id: el.id, which, orig: { ...el } }
   startWindowDrag()
 }
 
@@ -249,16 +304,37 @@ function onWindowUp() {
   commitChange()
   window.removeEventListener('pointermove', onWindowMove)
   window.removeEventListener('pointerup', onWindowUp)
+  window.removeEventListener('pointercancel', onWindowCancel)
+}
+
+/** 捏合等导致的取消：回滚本次未完成的拖拽 */
+function onWindowCancel() {
+  const active = drag
+  if (!active) return
+  const el = findEl(active.id)
+  if (active.type === 'create') {
+    els.value = els.value.filter((x) => x.id !== active.id)
+    if (selectedId.value === active.id) selectedId.value = null
+  } else if (el) {
+    Object.assign(el, active.orig)
+  }
+  drag = null
+  pendingSnapshot = null
+  window.removeEventListener('pointermove', onWindowMove)
+  window.removeEventListener('pointerup', onWindowUp)
+  window.removeEventListener('pointercancel', onWindowCancel)
 }
 
 function startWindowDrag() {
   window.addEventListener('pointermove', onWindowMove)
   window.addEventListener('pointerup', onWindowUp)
+  window.addEventListener('pointercancel', onWindowCancel)
 }
 
 onUnmounted(() => {
   window.removeEventListener('pointermove', onWindowMove)
   window.removeEventListener('pointerup', onWindowUp)
+  window.removeEventListener('pointercancel', onWindowCancel)
 })
 
 function onCanvasHover(e: PointerEvent) {
@@ -449,14 +525,21 @@ const rendered = computed(() => routeWires(els.value))
           </template>
         </aside>
 
-        <div class="canvas-wrap">
+        <div
+          class="canvas-wrap"
+          ref="canvasWrapRef"
+          @touchstart="onCanvasTouchStart"
+          @touchmove="onCanvasTouchMove"
+          @touchend="onCanvasTouchEnd"
+          @touchcancel="onCanvasTouchEnd"
+        >
           <svg
             ref="svgRef"
             class="canvas"
             :class="{ placing: tool !== 'select' }"
             :viewBox="`0 0 ${CANVAS_W} ${CANVAS_H}`"
-            :width="CANVAS_W"
-            :height="CANVAS_H"
+            :width="CANVAS_W * canvasZoom"
+            :height="CANVAS_H * canvasZoom"
             @pointerdown="onCanvasDown"
             @pointermove="onCanvasHover"
             @pointerleave="hover = null"
@@ -562,6 +645,8 @@ const rendered = computed(() => routeWires(els.value))
   inset: 0;
   z-index: 100;
   background: rgba(17, 24, 39, 0.45);
+  /* 阻止原生捏合缩放：画布用自定义缩放，工具栏不缩放 */
+  touch-action: pan-y;
   display: flex;
   align-items: center;
   justify-content: center;

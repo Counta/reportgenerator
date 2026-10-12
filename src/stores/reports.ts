@@ -1,7 +1,8 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { CircuitData, ReportData, TableData } from '@/types'
+import type { CircuitData, ImageData, ReportData, TableData } from '@/types'
 import { cloneCircuit } from '@/lib/circuit'
+import { cloneImage } from '@/lib/image'
 import {
   getUserProfile,
   saveUserProfile,
@@ -26,6 +27,9 @@ function loadFromStorage(): ReportData[] {
       }
       if (r && !Array.isArray(r.circuits)) {
         r.circuits = []
+      }
+      if (r && !Array.isArray(r.images)) {
+        r.images = []
       }
       return r
     })
@@ -88,6 +92,7 @@ export const useReportsStore = defineStore('reports', () => {
       },
       tables: [],
       circuits: [],
+      images: [],
     }
     reports.value.unshift(report)
     save()
@@ -108,6 +113,7 @@ export const useReportsStore = defineStore('reports', () => {
       values: { ...src.values },
       tables: (src.tables || []).map(cloneTable),
       circuits: (src.circuits || []).map(cloneCircuit),
+      images: (src.images || []).map(cloneImage),
     }
     reports.value.unshift(copy)
     save()
@@ -216,6 +222,41 @@ export const useReportsStore = defineStore('reports', () => {
     save()
   }
 
+  /** 插入图片 */
+  function addImage(reportId: string, image: ImageData) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report) return
+    if (!Array.isArray(report.images)) report.images = []
+    report.images.push(cloneImage(image))
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 更新图片（整体替换） */
+  function updateImage(reportId: string, image: ImageData) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report || !Array.isArray(report.images)) return
+    const idx = report.images.findIndex((i) => i.id === image.id)
+    if (idx < 0) return
+    report.images[idx] = cloneImage(image)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
+  /** 删除图片 */
+  function removeImage(reportId: string, imageId: string) {
+    const report = reports.value.find((r) => r.id === reportId)
+    if (!report || !Array.isArray(report.images)) return
+    const idx = report.images.findIndex((i) => i.id === imageId)
+    if (idx < 0) return
+    report.images.splice(idx, 1)
+    report.updatedAt = new Date().toISOString()
+    reports.value = [...reports.value]
+    save()
+  }
+
   /** 从快照完整恢复报告数据（撤销/重做） */
   function restoreSnapshot(
     reportId: string,
@@ -224,6 +265,7 @@ export const useReportsStore = defineStore('reports', () => {
       values: Record<string, string>
       tables: TableData[]
       circuits?: CircuitData[]
+      images?: ImageData[]
     },
   ) {
     const report = reports.value.find((r) => r.id === reportId)
@@ -232,6 +274,7 @@ export const useReportsStore = defineStore('reports', () => {
     report.values = { ...snapshot.values }
     report.tables = (snapshot.tables || []).map(cloneTable)
     report.circuits = (snapshot.circuits || []).map(cloneCircuit)
+    report.images = (snapshot.images || []).map(cloneImage)
     report.updatedAt = new Date().toISOString()
     reports.value = [...reports.value]
     save()
@@ -263,6 +306,9 @@ export const useReportsStore = defineStore('reports', () => {
               .filter((c) => c && Array.isArray(c.elements))
               .map(cloneCircuit)
           : [],
+        images: Array.isArray(obj.images)
+          ? (obj.images as ImageData[]).map(cloneImage)
+          : [],
       }
       reports.value.unshift(report)
       count++
@@ -289,6 +335,9 @@ export const useReportsStore = defineStore('reports', () => {
     removeTable,
     upsertCircuit,
     removeCircuit,
+    addImage,
+    updateImage,
+    removeImage,
     restoreSnapshot,
     importReports,
     exportJson,

@@ -4,11 +4,12 @@ import { useRoute, useRouter } from 'vue-router'
 import PageEditor from '@/components/PageEditor.vue'
 import InsertTableModal from '@/components/InsertTableModal.vue'
 import CircuitEditorModal from '@/components/CircuitEditorModal.vue'
+import InsertImageModal from '@/components/InsertImageModal.vue'
 import { circuitBBox, cloneCircuit } from '@/lib/circuit'
 import { formTemplate, CONTENT_REGION } from '@/lib/formTemplate'
 import { exportPage } from '@/lib/exporter'
 import { useReportsStore } from '@/stores/reports'
-import type { CircuitData, CircuitElement, ReportData, TableData } from '@/types'
+import type { CircuitData, CircuitElement, ImageData, ReportData, TableData } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,6 +43,7 @@ interface HistorySnapshot {
   values: Record<string, string>
   tables: TableData[]
   circuits: CircuitData[]
+  images: ImageData[]
 }
 
 function cloneSnapshot(r: ReportData): HistorySnapshot {
@@ -55,6 +57,7 @@ function cloneSnapshot(r: ReportData): HistorySnapshot {
       cells: t.cells.map((row) => [...row]),
     })),
     circuits: (r.circuits || []).map(cloneCircuit),
+    images: (r.images || []).map((i) => ({ ...i })),
   }
 }
 
@@ -67,6 +70,7 @@ function snapshotsEqual(a: HistorySnapshot, b: HistorySnapshot): boolean {
     if (a.values[k] !== b.values[k]) return false
   }
   if (JSON.stringify(a.circuits) !== JSON.stringify(b.circuits)) return false
+  if (JSON.stringify(a.images) !== JSON.stringify(b.images)) return false
   if (a.tables.length !== b.tables.length) return false
   for (let i = 0; i < a.tables.length; i++) {
     const tA = a.tables[i]
@@ -232,13 +236,115 @@ function onTitleInput(e: Event) {
   onTitle(e)
 }
 
+// ===== 触摸屏缩放优化：捏合放大页面时，顶栏保持原始物理尺寸 =====
+const topbarRef = ref<HTMLElement | null>(null)
+const editPageRef = ref<HTMLElement | null>(null)
+const baseDpr = window.devicePixelRatio
+
+function syncTopbarScale() {
+  const el = topbarRef.value
+  const page = editPageRef.value
+  if (!el || !page) return
+  const vv = window.visualViewport
+  // 浏览器缩放（如 Windows 触屏捏合、Ctrl+ +/-）体现在 devicePixelRatio
+  const browserZoom = window.devicePixelRatio / baseDpr
+  // 移动端捏合缩放（visual viewport）体现在 vv.scale
+  const pinchZoom = vv ? vv.scale : 1
+  const scale = browserZoom * pinchZoom
+
+  if (scale <= 1.01) {
+    el.style.position = ''
+    el.style.top = ''
+    el.style.left = ''
+    el.style.width = ''
+    el.style.transform = ''
+    el.style.transformOrigin = ''
+    page.style.paddingTop = ''
+    return
+  }
+
+  el.style.position = 'fixed'
+  el.style.top = `${vv?.offsetTop ?? 0}px`
+  el.style.left = `${vv?.offsetLeft ?? 0}px`
+  el.style.width = `${(vv ? vv.width : window.innerWidth) * scale}px`
+  el.style.transformOrigin = 'top left'
+  // 反向缩放：抵消捏合/浏览器缩放，顶栏在屏幕上不放大
+  el.style.transform = `scale(${1 / scale})`
+  // 顶栏 fixed 后脱离文档流，用等高占位避免内容上移
+  page.style.paddingTop = `${el.offsetHeight / scale}px`
+}
+
+const hasTouch = navigator.maxTouchPoints > 0
+
+// ===== 自定义捏合缩放：只缩放页面画布，顶栏与弹窗不受影响 =====
+const workspaceRef = ref<HTMLElement | null>(null)
+const canvasAreaRef = ref<HTMLElement | null>(null)
+const pageZoom = ref(1)
+
+let workspacePinch: { dist: number; zoom: number; cx: number; cy: number } | null = null
+
+function onWorkspaceTouchStart(e: TouchEvent) {
+  if (e.touches.length !== 2) return
+  const ca = canvasAreaRef.value
+  if (!ca) return
+  const a = e.touches[0]
+  const b = e.touches[1]
+  const midX = (a.clientX + b.clientX) / 2
+  const midY = (a.clientY + b.clientY) / 2
+  const rect = ca.getBoundingClientRect()
+  workspacePinch = {
+    dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+    zoom: pageZoom.value,
+    cx: (midX - rect.left) / pageZoom.value,
+    cy: (midY - rect.top) / pageZoom.value,
+  }
+  // 双指落下：终止进行中的单指拖拽（表格/电路图），避免误移动
+  window.dispatchEvent(new PointerEvent('pointercancel'))
+  e.preventDefault()
+}
+
+function onWorkspaceTouchMove(e: TouchEvent) {
+  if (!workspacePinch || e.touches.length < 2) return
+  const ws = workspaceRef.value
+  const ca = canvasAreaRef.value
+  if (!ws || !ca) return
+  const a = e.touches[0]
+  const b = e.touches[1]
+  const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+  const zoom = Math.min(4, Math.max(1, workspacePinch.zoom * (dist / workspacePinch.dist)))
+  const midX = (a.clientX + b.clientX) / 2
+  const midY = (a.clientY + b.clientY) / 2
+  ca.style.zoom = String(zoom)
+  // 以双指中点为锚点，缩放的同时跟随平移
+  const rect = ca.getBoundingClientRect()
+  ws.scrollLeft += rect.left - (midX - workspacePinch.cx * zoom)
+  ws.scrollTop += rect.top - (midY - workspacePinch.cy * zoom)
+  pageZoom.value = zoom
+  e.preventDefault()
+}
+
+function onWorkspaceTouchEnd(e: TouchEvent) {
+  if (e.touches.length < 2) workspacePinch = null
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydown, { capture: true })
+  if (hasTouch) {
+    window.visualViewport?.addEventListener('resize', syncTopbarScale)
+    window.visualViewport?.addEventListener('scroll', syncTopbarScale)
+    window.addEventListener('resize', syncTopbarScale)
+    syncTopbarScale()
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown, { capture: true })
   if (textChangeTimer) clearTimeout(textChangeTimer)
+  if (hasTouch) {
+    window.visualViewport?.removeEventListener('resize', syncTopbarScale)
+    window.visualViewport?.removeEventListener('scroll', syncTopbarScale)
+    window.removeEventListener('resize', syncTopbarScale)
+  }
 })
 
 const activeTableId = ref<string | null>(null)
@@ -475,6 +581,76 @@ function onRemoveCircuit(circuitId: string) {
   store.removeCircuit(report.value.id, circuitId)
 }
 
+// ================= 图片 =================
+const isImageModalOpen = ref(false)
+const imageModalDefaultPage = ref(1)
+const editingImage = ref<ImageData | null>(null)
+
+function onOpenInsertImage(page: number) {
+  editingImage.value = null
+  imageModalDefaultPage.value = page
+  isImageModalOpen.value = true
+}
+
+function onConfirmInsertImage(payload: {
+  page: number
+  src: string
+  naturalW: number
+  naturalH: number
+}) {
+  if (!report.value) return
+  recordDiscreteAction()
+  const { page, src, naturalW, naturalH } = payload
+  const region = page === 1 ? CONTENT_REGION.page1 : CONTENT_REGION.page2
+  const existing = editingImage.value
+
+  if (existing) {
+    // 更换图片：位置与宽度保持不变，只替换图片内容与原始尺寸
+    store.updateImage(report.value.id, {
+      ...existing,
+      src,
+      naturalW,
+      naturalH,
+    })
+    return
+  }
+
+  // 默认宽度：在内容区内等比铺开，宽高中取更紧的一侧
+  const w = Math.min(region.w - 40, (region.h - 40) * (naturalW / naturalH))
+  const image: ImageData = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    page,
+    x: Math.round(region.x + (region.w - w) / 2),
+    y: Math.round(region.y + 24),
+    w: Math.round(w),
+    src,
+    naturalW,
+    naturalH,
+  }
+  store.addImage(report.value.id, image)
+}
+
+function onUpdateImage(image: ImageData) {
+  if (!report.value) return
+  if (!isGestureActive) recordDiscreteAction()
+  store.updateImage(report.value.id, image)
+}
+
+function onEditImage(imageId: string) {
+  if (!report.value) return
+  const img = report.value.images?.find((x) => x.id === imageId)
+  if (!img) return
+  imageModalDefaultPage.value = img.page
+  editingImage.value = img
+  isImageModalOpen.value = true
+}
+
+function onRemoveImage(imageId: string) {
+  if (!report.value) return
+  recordDiscreteAction()
+  store.removeImage(report.value.id, imageId)
+}
+
 function onUpdateField(fieldId: string, value: string) {
   if (report.value) {
     if (fieldId === 'courseType') {
@@ -545,8 +721,8 @@ function goBack() {
 </script>
 
 <template>
-  <div class="edit-page">
-    <header class="topbar">
+  <div class="edit-page" ref="editPageRef">
+    <header class="topbar" ref="topbarRef">
       <button class="ghost" @click="goBack">← 返回列表</button>
       <div class="title-wrap">
         <input
@@ -762,14 +938,44 @@ function goBack() {
           </svg>
           <span>插入电路图</span>
         </button>
+        <button
+          type="button"
+          class="ghost table-shortcut-btn"
+          title="选择图片并插入实验内容"
+          @click="onOpenInsertImage(1)"
+        >
+          <svg
+            class="action-svg"
+            viewBox="0 0 24 24"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+          <span>插入图片</span>
+        </button>
         <button class="primary" :disabled="exporting" @click="exportAll">
           {{ exporting ? '导出中…' : '导出图片' }}
         </button>
       </div>
     </header>
 
-    <div class="workspace">
-      <main class="canvas-area">
+    <div
+      class="workspace"
+      ref="workspaceRef"
+      @touchstart="onWorkspaceTouchStart"
+      @touchmove="onWorkspaceTouchMove"
+      @touchend="onWorkspaceTouchEnd"
+      @touchcancel="onWorkspaceTouchEnd"
+    >
+      <main class="canvas-area" ref="canvasAreaRef">
         <div
           v-for="pageNum in formTemplate.pages"
           :key="pageNum"
@@ -792,6 +998,10 @@ function goBack() {
               @update:circuit="onUpdateCircuit"
               @remove:circuit="onRemoveCircuit"
               @edit:circuit="onEditCircuit"
+              @update:image="onUpdateImage"
+              @remove:image="onRemoveImage"
+              @edit:image="onEditImage"
+              @open:insert-image="onOpenInsertImage"
               @gesture-start="onGestureStart"
               @gesture-end="onGestureEnd"
             />
@@ -813,6 +1023,13 @@ function goBack() {
       :default-page="circuitModalPage"
       @confirm="onConfirmCircuit"
     />
+
+    <InsertImageModal
+      v-model:visible="isImageModalOpen"
+      :default-page="imageModalDefaultPage"
+      :editing="editingImage !== null"
+      @confirm="onConfirmInsertImage"
+    />
   </div>
 </template>
 
@@ -821,6 +1038,8 @@ function goBack() {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* 阻止原生捏合缩放：工作区用自定义缩放，顶栏/弹窗保持原尺寸 */
+  touch-action: pan-x pan-y;
 }
 
 .topbar {

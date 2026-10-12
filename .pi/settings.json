@@ -1,4 +1,4 @@
 {
-  "defaultProvider": "intern",
-  "defaultModel": "deepseek-v4-flash-vision"
+  "defaultProvider": "internac2",
+  "defaultModel": "deepseek-v4-flash-0731"
 }

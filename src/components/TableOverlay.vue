@@ -121,11 +121,13 @@ function onMoveStart(e: PointerEvent) {
     isMoving.value = false
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     emit('gesture-end')
   }
 
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 function onColResizeStart(e: PointerEvent, colIdx: number) {
@@ -163,11 +165,13 @@ function onColResizeStart(e: PointerEvent, colIdx: number) {
     activeResizeCol.value = null
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     emit('gesture-end')
   }
 
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 function onRowResizeStart(e: PointerEvent, rowIdx: number) {
@@ -205,11 +209,13 @@ function onRowResizeStart(e: PointerEvent, rowIdx: number) {
     activeResizeRow.value = null
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     emit('gesture-end')
   }
 
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 function insertColAt(insertIdx: number) {
@@ -297,11 +303,13 @@ function onCornerResizeStart(e: PointerEvent) {
   const onUp = () => {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
     emit('gesture-end')
   }
 
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 let isComposing = false

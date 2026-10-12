@@ -4,3 +4,7 @@ dist/
 .DS_Store
 *.log
 nul
+
+# Pix Agent
+.pi/
+.pi-lens/

@@ -49,6 +49,8 @@ export interface ReportData {
   tables?: TableData[]
   /** 「实验内容」区域插入的电路图（浮动层，可再次编辑） */
   circuits?: CircuitData[]
+  /** 「实验内容」区域插入的图片（浮动层，可缩放） */
+  images?: ImageData[]
 }
 
 /** 电路图中的一个元件 / 导线（坐标为电路图内部单位，网格 10） */
@@ -78,6 +80,23 @@ export interface CircuitData {
   /** 显示宽度（PDF 点）；高度按内容宽高比计算，保持形状不变 */
   w: number
   elements: CircuitElement[]
+}
+
+/** 插入到报告中的图片 */
+export interface ImageData {
+  id: string
+  page: number
+  /** 左上角（PDF 点） */
+  x: number
+  y: number
+  /** 显示宽度（PDF 点）；高度按 naturalH/naturalW 宽高比计算 */
+  w: number
+  /** 图片 dataURL */
+  src: string
+  /** 原始宽度（像素） */
+  naturalW: number
+  /** 原始高度（像素） */
+  naturalH: number
 }
 
 /** 实验内容中插入的表格 */

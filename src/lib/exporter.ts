@@ -2,6 +2,7 @@ import { PAGE_SIZE_PT } from '@/types'
 import type { FormTemplate, ReportData, TableData } from '@/types'
 import { splitExperimentContent, calcCellFontSizePt } from '@/lib/textLayout'
 import { circuitDataUrl, circuitDisplayHeight, circuitObstacles } from '@/lib/circuit'
+import { imageObstacles } from '@/lib/image'
 
 /**
  * 逐页导出：将背景图与填写内容合成为 PNG。
@@ -287,7 +288,7 @@ export async function exportPage(
     675.1,
     16,
     data.tables || [],
-    circuitObstacles(data.circuits),
+    [...circuitObstacles(data.circuits), ...imageObstacles(data.images)],
   )
 
   for (const f of template.fields) {
@@ -343,6 +344,16 @@ export async function exportPage(
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(px(c.x, dpi), px(c.y, dpi), px(c.w, dpi), px(h, dpi))
     ctx.drawImage(cimg, px(c.x, dpi), px(c.y, dpi), px(c.w, dpi), px(h, dpi))
+  }
+
+  // 绘制属于该页的图片（白底遮挡横线）
+  for (const img of data.images || []) {
+    if (img.page !== page) continue
+    const h = (img.w * img.naturalH) / img.naturalW
+    const cimg = await loadImage(img.src)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(px(img.x, dpi), px(img.y, dpi), px(img.w, dpi), px(h, dpi))
+    ctx.drawImage(cimg, px(img.x, dpi), px(img.y, dpi), px(img.w, dpi), px(h, dpi))
   }
 
   return { dataUrl: canvas.toDataURL('image/png'), width: outW, height: outH }

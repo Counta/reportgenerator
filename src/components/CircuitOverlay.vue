@@ -57,10 +57,12 @@ function track(e: PointerEvent, onMove: (dx: number, dy: number) => void) {
     isMoving.value = false
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', up)
+    window.removeEventListener('pointercancel', up)
     emit('gesture-end')
   }
   window.addEventListener('pointermove', move)
   window.addEventListener('pointerup', up)
+  window.addEventListener('pointercancel', up)
 }
 
 function onMoveStart(e: PointerEvent) {
