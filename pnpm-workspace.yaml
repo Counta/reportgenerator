@@ -1,3 +1,5 @@
+allowBuilds:
+  pnpm: false
 onlyBuiltDependencies:
   - esbuild
   - vue-demi

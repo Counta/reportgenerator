@@ -136,26 +136,55 @@ const pageSpacers = computed<TableSpacer[]>(() => {
     })),
   ]
 
-  for (const t of obstacles.sort((a, b) => a.y - b.y)) {
-    const tW = t.w
-    const tH = t.h
+  // 1. 为每个障碍物计算侧边与间隔块范围
+  const sided = obstacles.map((t) => {
     const relLeft = Math.max(0, t.x - contentLeft)
-    const relRight = Math.max(0, contentWidth - relLeft - tW)
+    const relRight = Math.max(0, contentWidth - relLeft - t.w)
     const side: 'left' | 'right' = relLeft <= relRight ? 'left' : 'right'
-    const top = Math.max(0, t.y - contentTop - gap)
-    const push = Math.max(0, top - bottom[side])
-    const width = (side === 'left' ? relLeft : relRight) + tW + gap
-    const height = tH + gap * 2
+    const spacerW = (side === 'left' ? relLeft : relRight) + t.w + gap
+    const spacerTop = Math.max(0, t.y - contentTop - gap)
+    const spacerBot = spacerTop + t.h + gap * 2
+    return { id: t.id, side, top: spacerTop, bottom: spacerBot, width: spacerW }
+  })
+
+  // 2. 分侧排序后合并垂直重叠的障碍物
+  //    CSS float + clear 只能使同侧浮动依次下排，
+  //    无法让后续浮动回退到更高位置；
+  //    必须把重叠的障碍物合并为一个间隔块。
+  function mergeOnSide(items: typeof sided) {
+    const sorted = items.slice().sort((a, b) => a.top - b.top)
+    const res: { ids: string[]; side: 'left' | 'right'; top: number; bottom: number; width: number }[] = []
+    for (const s of sorted) {
+      const last = res.length ? res[res.length - 1] : null
+      if (last && s.top < last.bottom) {
+        // 垂直重叠 → 扩展已有合并块
+        last.bottom = Math.max(last.bottom, s.bottom)
+        last.width = Math.max(last.width, s.width)
+        last.ids.push(s.id)
+      } else {
+        res.push({ ids: [s.id], side: s.side, top: s.top, bottom: s.bottom, width: s.width })
+      }
+    }
+    return res
+  }
+  const mergedLeft = mergeOnSide(sided.filter((s) => s.side === 'left'))
+  const mergedRight = mergeOnSide(sided.filter((s) => s.side === 'right'))
+  const merged = [...mergedLeft, ...mergedRight].sort((a, b) => a.top - b.top)
+
+  // 3. 生成推块 + 间隔块
+  for (const m of merged) {
+    const push = Math.max(0, m.top - bottom[m.side])
+    const height = m.bottom - m.top
     // 零宽推块：不占水平空间，只把后续同侧浮动推到正确高度
     out.push({
-      id: `push-${t.id}`,
-      style: { float: side, clear: side, width: '0', height: pt(push) },
+      id: `push-${m.ids.join('-')}`,
+      style: { float: m.side, clear: m.side, width: '0', height: pt(push) },
     })
     out.push({
-      id: `spacer-${t.id}`,
-      style: { float: side, clear: side, width: pt(width), height: pt(height) },
+      id: `spacer-${m.ids.join('-')}`,
+      style: { float: m.side, clear: m.side, width: pt(m.width), height: pt(height) },
     })
-    bottom[side] = Math.max(bottom[side], top) + height
+    bottom[m.side] = Math.max(bottom[m.side], m.top) + height
   }
   return out
 })
