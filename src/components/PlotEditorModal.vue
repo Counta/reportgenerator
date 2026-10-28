@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import type { PlotCurve, PlotDocument, PlotNode } from '@/types/plot'
-import { axisSymbol, clampRange, clonePlot, fitRange, formatNumber, fromScreen, hasPoints, isWave, newCurve, newPlot, PLOT, plotDataUrl, plotError, plotSvg, templateNodes, toScreen, WAVE_NAMES, zoomAxis } from '@/lib/plot'
+import { axisSymbol, canvasSize, clampRange, clonePlot, fitRange, formatNumber, fromScreen, hasPoints, isWave, newCurve, newPlot, PLOT, plotDataUrl, plotError, plotLayout, plotSvg, shows, templateNodes, toScreen, WAVE_NAMES, zoomAxis } from '@/lib/plot'
 import type { PlotRange } from '@/lib/plot'
 import type { ExprPiece, MarkerKind } from '@/types/plot'
 
@@ -36,7 +36,11 @@ const cycleEditing = computed(() => !!curve.value?.repeat && curve.value.kind ==
 const viewDoc = computed<PlotDocument>(() => cycleEditing.value && curve.value
   ? { ...doc.value, title: `${curve.value.name} · 单周期`, xMin: 0, xMax: curve.value.period, curves: [{ ...curve.value, repeat: false }] }
   : doc.value)
-const drawing = computed(() => plotSvg(viewDoc.value))
+// The preview uses the same logical canvas as the report image, so text and lines match its scale.
+const canvas = computed(() => canvasSize(viewDoc.value))
+/** Handle size factor: keeps editor handles the same size on screen at any style scale. */
+const hs = computed(() => canvas.value.W / PLOT.width)
+const drawing = computed(() => plotSvg(viewDoc.value, { width: canvas.value.W, height: canvas.value.H }))
 const allKinds = Object.entries(WAVE_NAMES) as [PlotCurve['kind'], string][]
 const dataKinds = allKinds.filter(([k]) => k === 'data' || k === 'expr')
 const waveKinds = allKinds.filter(([k]) => k !== 'data' && k !== 'expr')
@@ -93,7 +97,13 @@ function push(before: PlotDocument) {
   if (past.value.length > 80) past.value.shift()
   future.value = []
 }
-function change(action: () => void) { const before = clonePlot(doc.value); action(); push(before) }
+function change(action: () => void) { const before = clonePlot(doc.value); action(); autoFit(); push(before) }
+/** While auto range is on, every edit refits the view so it ends at the largest point. */
+function autoFit() {
+  if (!doc.value.autoRange || cycleEditing.value || plotError({ ...doc.value, xMin: 0, xMax: 1, yMin: 0, yMax: 1 })) return
+  const r = fitRange(doc.value)
+  if (r) Object.assign(doc.value, r)
+}
 function flushWheel() {
   clearTimeout(wheelTimer)
   if (wheelBefore) { push(wheelBefore); wheelBefore = null }
@@ -110,7 +120,8 @@ function redo() {
 }
 function valueOf(e: Event): string { return (e.target as HTMLInputElement).value }
 function setDoc(key: 'title' | 'xLabel' | 'yLabel', e: Event) { change(() => { doc.value[key] = valueOf(e) }) }
-function setRange(key: 'xMin' | 'xMax' | 'yMin' | 'yMax', e: Event) { change(() => { doc.value[key] = valueOf(e).trim() ? Number(valueOf(e)) : NaN }) }
+function toggleShow(key: 'showTitle' | 'showAxes' | 'showNames' | 'showLegend') { change(() => { doc.value[key] = !shows(doc.value, key) }) }
+function setRange(key: 'xMin' | 'xMax' | 'yMin' | 'yMax', e: Event) { change(() => { doc.value.autoRange = false; doc.value[key] = valueOf(e).trim() ? Number(valueOf(e)) : NaN }) }
 function setParam(key: 'amplitude' | 'offset' | 'period' | 'phase' | 'duty', e: Event) {
   change(() => {
     if (!curve.value) return
@@ -140,6 +151,8 @@ function addCurve(kind: PlotCurve['kind'], repeat = false) {
     doc.value.curves.push(c); selected.value = c.id; selectedNode.value = 0
     // The first curve sets the initial view so it is never drawn off-screen.
     if (doc.value.curves.length === 1) { const r = fitRange(doc.value); if (r) Object.assign(doc.value, r) }
+    // The first data curve switches auto range on, so the axes end at its largest point.
+    if (kind === 'data' && doc.value.curves.filter(x => x.kind === 'data').length === 1) doc.value.autoRange = true
   })
   adding.value = false; panel.value = 'curve'
 }
@@ -260,6 +273,7 @@ function svgPoint(e: MouseEvent): DOMPoint {
 /** Apply a new view range. In single-cycle view X is fixed to [0, T], so only Y changes. */
 function applyRange(r: PlotRange) {
   const next = clampRange(r)
+  doc.value.autoRange = false // a manual view change ends auto range
   if (!cycleEditing.value) { doc.value.xMin = next.xMin; doc.value.xMax = next.xMax }
   doc.value.yMin = next.yMin; doc.value.yMax = next.yMax
 }
@@ -278,12 +292,15 @@ function zoomBy(factor: number, anchor?: [number, number], axes: 'xy' | 'x' | 'y
 function zoomStep(factor: number) { change(() => zoomBy(factor)) }
 function fitView() {
   const r = fitRange(cycleEditing.value && curve.value ? viewDoc.value : doc.value)
-  if (r) change(() => applyRange(r))
+  if (r) change(() => { applyRange(r); if (!cycleEditing.value) doc.value.autoRange = true })
+}
+function toggleAutoRange() {
+  change(() => { doc.value.autoRange = !doc.value.autoRange })
 }
 function showPeriods(n: number) {
   const c = curve.value
   if (!c || !(c.period > 0)) return
-  change(() => { doc.value.xMin = Number(c.phase.toPrecision(10)); doc.value.xMax = Number((c.phase + n * c.period).toPrecision(10)) })
+  change(() => { doc.value.autoRange = false; doc.value.xMin = Number(c.phase.toPrecision(10)); doc.value.xMax = Number((c.phase + n * c.period).toPrecision(10)) })
 }
 // Consecutive wheel ticks form one undo step.
 let wheelBefore: PlotDocument | null = null
@@ -310,9 +327,9 @@ function onStagePointerDown(e: PointerEvent) {
 }
 function movePan(e: PointerEvent) {
   if (!pan || pan.pointerId !== e.pointerId) return
-  const p = svgPoint(e), r = pan.range
-  const dx = (p.x - pan.start.x) / PLOT.w * (r.xMax - r.xMin)
-  const dy = (p.y - pan.start.y) / PLOT.h * (r.yMax - r.yMin)
+  const p = svgPoint(e), r = pan.range, L = plotLayout(viewDoc.value)
+  const dx = (p.x - pan.start.x) / L.w * (r.xMax - r.xMin)
+  const dy = (p.y - pan.start.y) / L.h * (r.yMax - r.yMin)
   applyRange({ xMin: r.xMin - dx, xMax: r.xMax - dx, yMin: r.yMin + dy, yMax: r.yMax + dy })
 }
 function endPan(e: PointerEvent) {
@@ -347,8 +364,7 @@ const handles = computed(() => {
   return raw.filter(h => h.x >= viewDoc.value.xMin && h.x <= viewDoc.value.xMax && h.y >= doc.value.yMin && h.y <= doc.value.yMax)
     .map(h => ({ ...h, pos: toScreen(viewDoc.value, h.x, h.y) }))
 })
-const selectedHandle = computed(() => handles.value.find(h => h.kind === 'node' && h.index === selectedNode.value))
-let drag: { before: PlotDocument; c: PlotCurve; kind: HandleKind; index: number; pointerId: number } | null = null
+let drag: { before: PlotDocument; view: PlotDocument; c: PlotCurve; kind: HandleKind; index: number; pointerId: number } | null = null
 function startDrag(e: PointerEvent, kind: HandleKind, index = 0) {
   // Right-click or Alt+click on a point deletes it.
   if (kind === 'node' && (e.button === 2 || (e.button === 0 && e.altKey))) {
@@ -359,19 +375,26 @@ function startDrag(e: PointerEvent, kind: HandleKind, index = 0) {
   card.value?.focus({ preventScroll: true })
   selectedNode.value = index
   panel.value = 'curve'
-  drag = { before: clonePlot(doc.value), c: curve.value, kind, index, pointerId: e.pointerId }
+  drag = { before: clonePlot(doc.value), view: clonePlot(viewDoc.value), c: curve.value, kind, index, pointerId: e.pointerId }
   svg.value!.setPointerCapture(e.pointerId)
 }
 function moveDrag(e: PointerEvent) {
   if (!drag || drag.pointerId !== e.pointerId) return
-  let [x, y] = pointerPosition(e)
-  x = Math.min(viewDoc.value.xMax, Math.max(viewDoc.value.xMin, rounded(x)))
-  y = Math.min(doc.value.yMax, Math.max(doc.value.yMin, rounded(y)))
   const { c, kind, index } = drag
+  // Auto range: data points may leave the view; map the pointer with the range from drag start
+  // so growing axes do not feed back into the pointer position.
+  const free = kind === 'node' && c.kind === 'data' && !!doc.value.autoRange
+  let [x, y] = free ? (() => { const p = svgPoint(e); return fromScreen(drag!.view, p.x, p.y) })() : pointerPosition(e)
+  if (free) { x = rounded(x); y = rounded(y) }
+  else {
+    x = Math.min(viewDoc.value.xMax, Math.max(viewDoc.value.xMin, rounded(x)))
+    y = Math.min(doc.value.yMax, Math.max(doc.value.yMin, rounded(y)))
+  }
   if (kind === 'node') {
     if (c.kind === 'data') c.nodes[index].x = x // measured points may be in any order
     else if (!(c.repeat && (index === 0 || index === c.nodes.length - 1))) c.nodes[index].x = Math.min(c.nodes[index + 1]?.x ?? doc.value.xMax, Math.max(c.nodes[index - 1]?.x ?? doc.value.xMin, x))
     c.nodes[index].y = y
+    if (free) autoFit()
   } else if (kind === 'phase') c.phase = x
   else if (kind === 'period') c.period = Math.max((doc.value.xMax - doc.value.xMin) / 200, x - c.phase)
   else if (kind === 'duty') c.duty = Math.min(0.99, Math.max(0.01, (x - c.phase) / c.period))
@@ -385,6 +408,7 @@ function endDrag(e: PointerEvent) {
   if (!drag || drag.pointerId !== e.pointerId) return
   const before = drag.before; drag = null
   if (svg.value?.hasPointerCapture(e.pointerId)) svg.value.releasePointerCapture(e.pointerId)
+  autoFit()
   push(before)
 }
 function cancelDrag() {
@@ -449,19 +473,14 @@ function onKeydown(e: KeyboardEvent) {
               <span class="range-caption">{{ formatNumber(viewDoc.xMin) }} ≤ x ≤ {{ formatNumber(viewDoc.xMax) }}</span>
             </div>
             <div class="plot-stage" :class="{ adding: tool === 'add' && curve && hasPoints(curve), panning }">
-              <svg ref="svg" viewBox="0 0 800 500" role="img" aria-label="图表预览，可拖动控制点" @pointerdown="onStagePointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerCancel" @lostpointercapture="onPointerCancel" @wheel="onWheel" @dblclick="onStageDblClick" @contextmenu.prevent @auxclick.prevent>
+              <svg ref="svg" :viewBox="`0 0 ${canvas.W} ${canvas.H}`" role="img" aria-label="图表预览，可拖动控制点" @pointerdown="onStagePointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerCancel" @lostpointercapture="onPointerCancel" @wheel="onWheel" @dblclick="onStageDblClick" @contextmenu.prevent @auxclick.prevent>
                 <g class="plot-render" v-html="drawing" />
                 <g v-if="!error" class="plot-handles">
                   <g v-for="(h, i) in handles" :key="`${selected}-${h.kind}-${i}`" :data-handle="h.kind" :data-index="h.index" @pointerdown="startDrag($event, h.kind, h.index)">
                     <title>{{ h.kind === 'node' ? `节点 ${i + 1}` : h.label }}：{{ formatNumber(h.x) }}, {{ formatNumber(h.y) }}</title>
-                    <circle :cx="h.pos[0]" :cy="h.pos[1]" r="15" fill="transparent" />
-                    <circle :cx="h.pos[0]" :cy="h.pos[1]" :r="h.kind === 'node' ? 5 : 7" :fill="h.kind === 'node' && h.index !== selectedNode ? 'white' : '#2563eb'" stroke="#2563eb" stroke-width="2" />
-                    <text v-if="h.kind !== 'node'" :x="h.pos[0] + 11" :y="h.pos[1] - 12" font-size="13" fill="#1d4ed8" stroke="white" stroke-width="3" paint-order="stroke">{{ h.label }}</text>
-                  </g>
-                  <g v-if="selectedHandle && tool === 'select' && canDeleteAt(selectedNode)" data-handle="delete" class="delete-handle" role="button" aria-label="删除选中的点" @pointerdown.stop.prevent="deletePoint(selectedNode)">
-                    <title>删除这个点（Delete 键）</title>
-                    <circle :cx="selectedHandle.pos[0] + 14" :cy="selectedHandle.pos[1] - 14" r="8" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5" />
-                    <path :d="`M${selectedHandle.pos[0] + 10.5},${selectedHandle.pos[1] - 17.5}l7,7m0,-7l-7,7`" stroke="#dc2626" stroke-width="1.6" stroke-linecap="round" />
+                    <circle :cx="h.pos[0]" :cy="h.pos[1]" :r="15 * hs" fill="transparent" />
+                    <circle :cx="h.pos[0]" :cy="h.pos[1]" :r="(h.kind === 'node' ? 5 : 7) * hs" :fill="h.kind === 'node' && h.index !== selectedNode ? 'white' : '#2563eb'" stroke="#2563eb" :stroke-width="2 * hs" />
+                    <text v-if="h.kind !== 'node'" :x="h.pos[0] + 11 * hs" :y="h.pos[1] - 12 * hs" :font-size="13 * hs" fill="#1d4ed8" stroke="white" :stroke-width="3 * hs" paint-order="stroke">{{ h.label }}</text>
                   </g>
                 </g>
               </svg>
@@ -561,10 +580,11 @@ function onKeydown(e: KeyboardEvent) {
               </template>
             </div>
             <div v-show="panel === 'chart'" id="chart-panel" class="inspector-content" role="tabpanel" aria-label="图表设置">
-              <label>图表标题<input :value="doc.title" maxlength="48" @change="setDoc('title', $event)" /></label>
+              <label>图表标题<input :value="doc.title" maxlength="48" :disabled="!shows(doc, 'showTitle')" @change="setDoc('title', $event)" /></label>
               <h3>坐标范围</h3>
               <div class="range-summary"><span>X {{ formatNumber(doc.xMin) }} ~ {{ formatNumber(doc.xMax) }}</span><span>Y {{ formatNumber(doc.yMin) }} ~ {{ formatNumber(doc.yMax) }}</span></div>
               <div class="button-row range-actions"><button :disabled="empty" @click="fitView">适应曲线</button><button :disabled="!!error || empty" @click="zoomStep(0.8)">放大</button><button :disabled="!!error || empty" @click="zoomStep(1.25)">缩小</button></div>
+              <label class="check"><input type="checkbox" :checked="!!doc.autoRange" @change="toggleAutoRange" />自动适应（范围止于数据最大值，缩放 / 平移后自动关闭）</label>
               <template v-if="curve && curve.period > 0 && (isWave(curve) || curve.repeat)">
                 <p class="hint">按当前曲线的周期设置 X 范围：</p>
                 <div class="button-row period-presets"><button v-for="n in [1, 2, 3, 5, 10]" :key="n" @click="showPeriods(n)">{{ n }} 个周期</button></div>
@@ -574,7 +594,13 @@ function onKeydown(e: KeyboardEvent) {
               <h3>坐标名称</h3>
               <div class="field-grid"><label>X 轴<input :value="doc.xLabel" maxlength="32" placeholder="名称 / 单位" @change="setDoc('xLabel', $event)" /></label><label>Y 轴<input :value="doc.yLabel" maxlength="32" placeholder="名称 / 单位" @change="setDoc('yLabel', $event)" /></label></div>
               <h3>显示</h3>
-              <label class="check"><input type="checkbox" :checked="doc.grid" @change="change(() => { doc.grid = !doc.grid })" />显示网格</label>
+              <div class="show-grid">
+                <label class="check"><input type="checkbox" :checked="shows(doc, 'showAxes')" @change="toggleShow('showAxes')" />坐标轴</label>
+                <label class="check"><input type="checkbox" :checked="shows(doc, 'showNames')" @change="toggleShow('showNames')" />坐标名称</label>
+                <label class="check"><input type="checkbox" :checked="doc.grid" @change="change(() => { doc.grid = !doc.grid })" />网格线</label>
+                <label class="check"><input type="checkbox" :checked="shows(doc, 'showTitle')" @change="toggleShow('showTitle')" />图表标题</label>
+                <label class="check"><input type="checkbox" :checked="shows(doc, 'showLegend')" @change="toggleShow('showLegend')" />图例</label>
+              </div>
               <label class="check"><input type="checkbox" :checked="doc.joinJumps" @change="change(() => { doc.joinJumps = !doc.joinJumps })" />用竖线标记跳变</label>
               <p class="hint">{{ doc.joinJumps ? '竖线表示瞬时切换，不平滑跳变。' : '跳变断开；空心为左侧极限，实心为右侧取值。' }}</p>
             </div>
@@ -636,8 +662,8 @@ button.accent { color: var(--primary); border-color: #bfdbfe; }
 .point-index { font-size: 12px; color: #94a3b8; text-align: right; font-variant-numeric: tabular-nums; }
 button.row-delete { border: 0; background: transparent; padding: 4px; color: #94a3b8; font-size: 13px; }
 button.row-delete:hover:not(:disabled) { color: #dc2626; }
+.show-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }.show-grid .check { margin: 6px 0; }
 .point-tools { display: flex; gap: 4px; }.point-tools button { padding: 5px 10px; }
-.delete-handle { cursor: pointer; }
 .piece { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #f8fafc; }
 .piece-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #64748b; margin-bottom: 8px; }
 button.link { border: 0; background: transparent; padding: 0 2px; font-size: 12px; }

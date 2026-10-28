@@ -44,6 +44,15 @@ export interface PlotDocument {
   yMin: number
   yMax: number
   grid: boolean
+  /** Visibility of chart parts. Undefined means shown (charts saved before these options existed). */
+  showTitle?: boolean
+  showAxes?: boolean
+  showNames?: boolean
+  showLegend?: boolean
+  /** Editor keeps the range fitted to the curves until the user zooms, pans or types a range. */
+  autoRange?: boolean
+  /** Render-only: text / line scale derived from the image's display width (1 = full width). */
+  scale?: number
   /** Vertical jump markers vs disconnected segments with endpoint dots. */
   joinJumps: boolean
   curves: PlotCurve[]

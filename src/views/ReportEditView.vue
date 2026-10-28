@@ -7,6 +7,7 @@ import CircuitEditorModal from '@/components/CircuitEditorModal.vue'
 import InsertImageModal from '@/components/InsertImageModal.vue'
 import PlotEditorModal from '@/components/PlotEditorModal.vue'
 import type { PlotDocument } from '@/types/plot'
+import { plotDataUrl, styleScaleFor, withScale } from '@/lib/plot'
 import { circuitBBox, cloneCircuit } from '@/lib/circuit'
 import { formTemplate, CONTENT_REGION } from '@/lib/formTemplate'
 import { exportPage } from '@/lib/exporter'
@@ -655,26 +656,29 @@ function insertImage(payload: {
 
   if (existing) {
     // 更换图片：位置与宽度保持不变，只替换图片内容与原始尺寸
+    const plot = payload.plot ? withScale(payload.plot, existing.w) : undefined
     store.updateImage(report.value.id, {
       ...existing,
-      src,
+      src: plot ? plotDataUrl(plot) : src,
       naturalW,
       naturalH,
-      ...(payload.plot ? { plot: payload.plot } : {}),
+      ...(plot ? { plot } : {}),
     })
     return
   }
 
   // 默认宽度：在内容区内等比铺开，宽高中取更紧的一侧
   const w = Math.min(region.w - 40, (region.h - 40) * (naturalW / naturalH))
+  // 图表按显示宽度重新生成，使文字与线宽适合该尺寸
+  const plot = payload.plot ? withScale(payload.plot, Math.round(w)) : undefined
   const image: ImageData = {
-    ...(payload.plot ? { plot: payload.plot } : {}),
+    ...(plot ? { plot } : {}),
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     page,
     x: Math.round(region.x + (region.w - w) / 2),
     y: Math.round(region.y + 24),
     w: Math.round(w),
-    src,
+    src: plot ? plotDataUrl(plot) : src,
     naturalW,
     naturalH,
   }
@@ -684,6 +688,11 @@ function insertImage(payload: {
 function onUpdateImage(image: ImageData) {
   if (!report.value) return
   if (!isGestureActive) recordDiscreteAction()
+  // 缩放图表时按新宽度重新生成，文字与线宽随之调整（只在比例实际变化时重绘）
+  if (image.plot && styleScaleFor(image.w) !== (image.plot.scale ?? 1)) {
+    const plot = withScale(image.plot, image.w)
+    image = { ...image, plot, src: plotDataUrl(plot) }
+  }
   store.updateImage(report.value.id, image)
 }
 
@@ -693,7 +702,7 @@ function onEditImage(imageId: string) {
   if (!img) return
   if (img.plot) {
     editingPlot.value = img
-    plotSource.value = img.plot
+    plotSource.value = withScale(img.plot, img.w)
     plotDefaultPage.value = img.page
     isPlotModalOpen.value = true
     return

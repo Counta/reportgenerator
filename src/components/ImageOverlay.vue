@@ -134,18 +134,23 @@ function onResizeStart(e: PointerEvent) {
 }
 .i-actions {
   position: absolute;
-  top: -24px;
+  /* Bottom padding reaches the image edge, so moving up to the buttons never leaves :hover. */
+  top: -28px;
   right: 0;
+  padding: 4px 0 6px 12px;
   display: flex;
   gap: 4px;
   opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s;
+  visibility: hidden;
+  /* Hide after a short delay; visibility flips last so buttons stay clickable while fading. */
+  transition: opacity 0.15s ease 0.35s, visibility 0s linear 0.5s;
 }
 .image-overlay:hover .i-actions,
-.image-overlay:focus-within .i-actions {
+.image-overlay:focus-within .i-actions,
+.image-overlay.is-moving .i-actions {
   opacity: 1;
-  pointer-events: auto;
+  visibility: visible;
+  transition-delay: 0s;
 }
 .i-actions button {
   font-size: 11px;
@@ -170,8 +175,13 @@ function onResizeStart(e: PointerEvent) {
   border-radius: 2px;
   cursor: nwse-resize;
   opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease 0.35s, visibility 0s linear 0.5s;
 }
-.image-overlay:hover .i-resize {
+.image-overlay:hover .i-resize,
+.image-overlay.is-moving .i-resize {
   opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }
 </style>

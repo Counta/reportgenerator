@@ -2,7 +2,7 @@ import type { CurveKind, PlotCurve, PlotDocument, PlotNode } from '@/types/plot'
 import { compileExpr, constValue } from '@/lib/plotMath'
 import type { Fn } from '@/lib/plotMath'
 
-export const PLOT = { width: 800, height: 500, left: 76, top: 54, w: 690, h: 354 } as const
+export const PLOT = { width: 800, height: 500 } as const
 export const WAVE_NAMES: Record<CurveKind, string> = {
   sin: '正弦', cos: '余弦', square: '方波', triangle: '三角波', saw: '锯齿波', nodes: '节点曲线',
   data: '实验数据', expr: '函数表达式',
@@ -27,10 +27,11 @@ export function newCurve(kind: PlotCurve['kind'], index = 0): PlotCurve {
   if (kind === 'expr') c.pieces = [{ expr: '0.2x', from: '', to: '' }]
   return c
 }
-/** A new plot starts without curves; the user picks the first waveform. */
+/** A new plot starts without curves and shows only the axes; title, names, grid and legend are opt-in. */
 export function newPlot(): PlotDocument {
   return { version: 1, title: '图表', xLabel: 'x', yLabel: 'y', xMin: 0, xMax: 6,
-    yMin: -1.5, yMax: 1.5, grid: true, joinJumps: true, curves: [] }
+    yMin: -1.5, yMax: 1.5, grid: false, joinJumps: true, curves: [],
+    showTitle: false, showAxes: true, showNames: false, showLegend: false, autoRange: true }
 }
 export function clonePlot(doc: PlotDocument): PlotDocument {
   return JSON.parse(JSON.stringify(doc)) as PlotDocument
@@ -96,13 +97,58 @@ export function plotError(d: PlotDocument): string {
   }
   return ''
 }
+/** Parts default to shown so charts saved before these options keep rendering them. */
+export const shows = (d: PlotDocument, key: 'showTitle' | 'showAxes' | 'showNames' | 'showLegend') => d[key] !== false
+const textWidth = (s: string) => [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 0xff ? 13 : 7.5), 0)
+export interface PlotLayout { left: number; top: number; w: number; h: number }
+/**
+ * Text / line scale for an image displayed `widthPt` wide on the page. Pure proportional scaling makes
+ * small charts unreadable, so physical text size follows (w/800)^0.25 instead of w/800
+ * (about 11pt at half width and 9.5pt at 240pt wide).
+ */
+export function styleScaleFor(widthPt: number): number {
+  const s = widthPt / PLOT.width
+  if (!(s > 0)) return 1
+  return Number(Math.min(3, Math.max(1, s ** -0.75)).toFixed(2))
+}
+/** Copy of the plot rendered for an image of the given display width. */
+export function withScale(d: PlotDocument, widthPt: number): PlotDocument {
+  return { ...d, scale: styleScaleFor(widthPt) }
+}
+/** Logical drawing size: a larger style scale draws on a smaller canvas that is then enlarged to 800×500. */
+export function canvasSize(d: PlotDocument): { W: number; H: number } {
+  const k = d.scale && d.scale > 0 ? d.scale : 1
+  return { W: PLOT.width / k, H: PLOT.height / k }
+}
+/** Plot area inside the image; margins shrink when title, names or legend are hidden. */
+let layoutCache: { key: string; value: PlotLayout } | null = null
+export function plotLayout(d: PlotDocument): PlotLayout {
+  const { W, H } = canvasSize(d)
+  const axes = shows(d, 'showAxes'), names = shows(d, 'showNames')
+  const legendRows = shows(d, 'showLegend') && d.curves.length ? Math.ceil(d.curves.length / 3) : 0
+  // toScreen calls this for every sample; cache on the inputs that affect the result.
+  const key = [W, axes, names, legendRows, shows(d, 'showTitle'), d.xLabel, d.yMin, d.yMax].join('|')
+  if (layoutCache?.key === key) return layoutCache.value
+  const top = shows(d, 'showTitle') ? 56 : 26
+  const bottom = (axes ? 30 : 12) + (legendRows ? 14 + legendRows * 18 : 0)
+  const h = H - top - bottom
+  // Left margin fits the widest Y tick label.
+  const yLabels = axes ? axisTicks(d.yMin, d.yMax, h, 'y').map(v => textWidth(formatNumber(v))) : []
+  const left = axes ? Math.max(40, Math.min(W * 0.3, Math.max(0, ...yLabels) + 20)) : 16
+  const right = (axes ? 26 : 16) + (names ? Math.min(W * 0.25, textWidth(d.xLabel) + 8) : 0)
+  const value = { left, top, w: W - left - right, h }
+  layoutCache = { key, value }
+  return value
+}
 export function toScreen(d: PlotDocument, x: number, y: number): [number, number] {
-  return [PLOT.left + (x - d.xMin) / (d.xMax - d.xMin) * PLOT.w,
-    PLOT.top + (d.yMax - y) / (d.yMax - d.yMin) * PLOT.h]
+  const L = plotLayout(d)
+  return [L.left + (x - d.xMin) / (d.xMax - d.xMin) * L.w,
+    L.top + (d.yMax - y) / (d.yMax - d.yMin) * L.h]
 }
 export function fromScreen(d: PlotDocument, x: number, y: number): [number, number] {
-  return [d.xMin + (x - PLOT.left) / PLOT.w * (d.xMax - d.xMin),
-    d.yMax - (y - PLOT.top) / PLOT.h * (d.yMax - d.yMin)]
+  const L = plotLayout(d)
+  return [d.xMin + (x - L.left) / L.w * (d.xMax - d.xMin),
+    d.yMax - (y - L.top) / L.h * (d.yMax - d.yMin)]
 }
 export function waveValue(c: PlotCurve, x: number): number {
   const u = (x - c.phase) / c.period
@@ -164,7 +210,10 @@ function niceRange(min: number, max: number, pad: number): [number, number] {
 /** Range that shows every curve: Y covers all values, X covers node data or ~3 periods of periodic curves. */
 export function fitRange(d: PlotDocument): PlotRange | null {
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, period = 0, phase = Infinity
+  // With measured data, the axes follow the data alone; other curves are drawn within that range.
+  const hasData = d.curves.some(c => c.kind === 'data' && c.nodes.length)
   for (const c of d.curves) {
+    if (hasData && c.kind !== 'data') continue
     if (c.kind === 'data') {
       for (const n of c.nodes) { x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y) }
       continue
@@ -207,8 +256,13 @@ export function fitRange(d: PlotDocument): PlotRange | null {
   if (!Number.isFinite(x0) || !Number.isFinite(x1)) return null
   const [yMin, yMax] = niceRange(y0, y1, 0.12)
   if (d.curves.some(c => c.kind === 'data')) {
-    const [xMin, xMax] = niceRange(x0, x1, 0.05)
-    return clampRange({ xMin, xMax, yMin, yMax })
+    // Data charts end exactly at the largest X / Y; non-negative data starts at 0 so the axes meet at the origin.
+    const tight = (lo: number, hi: number): [number, number] => {
+      const a = lo >= 0 ? 0 : lo, b = hi <= 0 ? 0 : hi
+      return b > a ? [a, b] : [a - 1, b + 1]
+    }
+    const [xMin, xMax] = tight(x0, x1), [yLo, yHi] = tight(y0, y1)
+    return clampRange({ xMin, xMax, yMin: yLo, yMax: yHi })
   }
   const xMin = x1 > x0 ? x0 : x0 - 1, xMax = x1 > x0 ? x1 : x0 + 1
   return clampRange({ xMin, xMax, yMin, yMax })
@@ -225,16 +279,29 @@ export function clampRange(r: PlotRange): PlotRange {
   return { xMin: fix(r.xMin), xMax: fix(r.xMax), yMin: fix(r.yMin), yMax: fix(r.yMax) }
 }
 
-export function ticks(min: number, max: number): number[] {
-  const raw = (max - min) / 7
-  const power = 10 ** Math.floor(Math.log10(raw))
-  const step = [1, 2, 5, 10].find(n => n * power >= raw)! * power
-  const result: number[] = []
-  for (let i = Math.ceil(min / step); i <= Math.floor(max / step); i++) result.push(Number((i * step).toPrecision(12)))
-  return result
-}
 export function formatNumber(n: number): string {
   return Math.abs(n) < 1e-12 ? '0' : Number(n.toPrecision(5)).toString()
+}
+/**
+ * Ticks whose labels fit the axis length: start from a fine 1-2-5 step and coarsen until neighbouring
+ * labels keep a gap (X compares label widths, Y the line height). The step therefore follows both the
+ * chart's display size and the zoom level.
+ */
+export function axisTicks(min: number, max: number, lengthPx: number, axis: 'x' | 'y'): number[] {
+  const span = max - min
+  if (!(span > 0) || !(lengthPx > 0)) return []
+  let exp = Math.floor(Math.log10(span / 40)), mant = 0
+  const mants = [1, 2, 5]
+  for (let guard = 0; guard < 40; guard++) {
+    const step = mants[mant] * 10 ** exp
+    const values: number[] = []
+    for (let i = Math.ceil(min / step - 1e-9); i <= Math.floor(max / step + 1e-9); i++) values.push(Number((i * step).toPrecision(12)))
+    const spacing = step / span * lengthPx
+    const need = axis === 'y' ? 30 : Math.max(...values.map(v => textWidth(formatNumber(v)))) + 14
+    if (values.length <= 2 || spacing >= need) return values
+    if (++mant === 3) { mant = 0; exp++ }
+  }
+  return [min, max]
 }
 const escapeXml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]!)
 /** Tile the exact cycle, including unequal endpoints and explicit boundary jumps. */
@@ -278,14 +345,18 @@ function markerShape(kind: PlotCurve['marker'], x: number, y: number, color: str
   if (kind === 'none') return ''
   return `<circle cx="${p(x)}" cy="${p(y)}" r="${size}" fill="${color}"/>`
 }
-/** Measured points joined by straight segments in ascending X, with a marker on every point. */
+/** Measured points joined by straight segments in ascending X. Markers are drawn by dataMarkers. */
 function dataMarkup(c: PlotCurve, d: PlotDocument): string {
   const pts = c.nodes.map((n, i) => ({ n, i })).sort((u, v) => u.n.x - v.n.x || u.i - v.i)
     .map(({ n }) => toScreen(d, n.x, n.y))
   const path = pts.length > 1 ? pts.map((p, i) => `${i ? 'L' : 'M'}${Number(p[0].toFixed(3))},${Number(p[1].toFixed(3))}`).join('') : ''
-  const line = path ? `<path d="${path}" stroke="${c.color}" stroke-width="2.2" fill="none" ${c.dashed ? 'stroke-dasharray="8 5"' : ''}/>` : ''
-  const marks = pts.map(([x, y]) => markerShape(c.marker ?? 'circle', x, y, c.color)).join('')
-  return line + marks
+  return path ? `<path d="${path}" stroke="${c.color}" stroke-width="2.2" fill="none" ${c.dashed ? 'stroke-dasharray="8 5"' : ''}/>` : ''
+}
+/** Markers sit outside the clip so points exactly on the range edge are drawn whole. */
+function dataMarkers(c: PlotCurve, d: PlotDocument): string {
+  const ex = (d.xMax - d.xMin) * 1e-9, ey = (d.yMax - d.yMin) * 1e-9
+  return c.nodes.filter(n => n.x >= d.xMin - ex && n.x <= d.xMax + ex && n.y >= d.yMin - ey && n.y <= d.yMax + ey)
+    .map(n => { const [x, y] = toScreen(d, n.x, n.y); return markerShape(c.marker ?? 'circle', x, y, c.color) }).join('')
 }
 function exprMarkup(c: PlotCurve, d: PlotDocument): string {
   const { pieces } = compilePieces(c, d)
@@ -349,35 +420,64 @@ function curveMarkup(c: PlotCurve, d: PlotDocument): string {
   }
   return `<path d="${path}" stroke="${c.color}" stroke-width="2.4" fill="none" ${c.dashed ? 'stroke-dasharray="8 5"' : ''}/>${dots}`
 }
-/** Same SVG source is used in the editor, persisted report image and raster/PDF export. */
-export function plotSvg(d: PlotDocument): string {
+/**
+ * Same SVG source is used in the editor, persisted report image and raster/PDF export.
+ * `outer` is the SVG's own width/height; the drawing is laid out on canvasSize(d) and scaled to fit.
+ */
+export function plotSvg(d: PlotDocument, outer: { width: number; height: number } = PLOT): string {
   const error = plotError(d)
   if (error) return ''
-  const xt = ticks(d.xMin, d.xMax), yt = ticks(d.yMin, d.yMax)
-  let content = `<rect width="800" height="500" fill="white"/><defs><clipPath id="plot-clip"><rect x="${PLOT.left}" y="${PLOT.top}" width="${PLOT.w}" height="${PLOT.h}"/></clipPath></defs>`
+  const { W, H } = canvasSize(d)
+  const L = plotLayout(d), right = L.left + L.w, bottom = L.top + L.h
+  const axes = shows(d, 'showAxes'), names = shows(d, 'showNames')
+  const n = (v: number) => Number(v.toFixed(2))
+  // Tick spacing adapts to label size, chart size and zoom so labels never collide.
+  const xt = axisTicks(d.xMin, d.xMax, L.w, 'x')
+  const yt = axisTicks(d.yMin, d.yMax, L.h, 'y')
+  let content = `<rect width="${n(W)}" height="${n(H)}" fill="white"/><defs><clipPath id="plot-clip"><rect x="${n(L.left - 2)}" y="${n(L.top - 2)}" width="${n(L.w + 4)}" height="${n(L.h + 4)}"/></clipPath>`
+    + `<marker id="axis-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,1L10,5L0,9L3,5Z" fill="#374151"/></marker></defs>`
   content += `<g font-family="'Microsoft YaHei', sans-serif" font-size="13" fill="#374151">`
-  content += `<text x="400" y="28" text-anchor="middle" font-size="19" font-weight="600">${escapeXml(d.title.length > 36 ? d.title.slice(0, 35) + '…' : d.title)}</text>`
-  for (const x of xt) {
-    const sx = toScreen(d, x, 0)[0]
-    if (d.grid) content += `<path d="M${sx},54V408" stroke="#e5e7eb"/>`
-    content += `<text x="${sx}" y="430" text-anchor="middle">${formatNumber(x)}</text>`
+  const maxTitle = Math.max(8, Math.floor(W / 20))
+  if (shows(d, 'showTitle')) content += `<text x="${n(W / 2)}" y="32" text-anchor="middle" font-size="19" font-weight="600">${escapeXml(d.title.length > maxTitle ? d.title.slice(0, maxTitle - 1) + '…' : d.title)}</text>`
+  if (d.grid) {
+    for (const x of xt) content += `<path d="M${n(toScreen(d, x, 0)[0])},${n(L.top)}V${n(bottom)}" stroke="#e5e7eb"/>`
+    for (const y of yt) content += `<path d="M${n(L.left)},${n(toScreen(d, 0, y)[1])}H${n(right)}" stroke="#e5e7eb"/>`
   }
-  for (const y of yt) {
-    const sy = toScreen(d, 0, y)[1]
-    if (d.grid) content += `<path d="M76,${sy}H766" stroke="#e5e7eb"/>`
-    content += `<text x="65" y="${sy + 4}" text-anchor="end">${formatNumber(y)}</text>`
+  // Axes cross at the origin when it is in view, otherwise along the left / bottom edge.
+  const xZero = d.xMin <= 0 && d.xMax >= 0, yZero = d.yMin <= 0 && d.yMax >= 0
+  const [ax, ay] = toScreen(d, xZero ? 0 : d.xMin, yZero ? 0 : d.yMin)
+  const origin = xZero && yZero
+  if (axes) {
+    content += `<path d="M${n(L.left)},${n(ay)}H${n(right + 18)}" stroke="#374151" stroke-width="1.3" marker-end="url(#axis-arrow)"/>`
+    content += `<path d="M${n(ax)},${n(bottom)}V${n(L.top - 18)}" stroke="#374151" stroke-width="1.3" marker-end="url(#axis-arrow)"/>`
+    for (const x of xt) {
+      if (origin && x === 0) continue
+      const sx = n(toScreen(d, x, 0)[0])
+      content += `<path d="M${sx},${n(ay)}v5" stroke="#374151"/><text x="${sx}" y="${n(ay + 19)}" text-anchor="middle">${formatNumber(x)}</text>`
+    }
+    for (const y of yt) {
+      if (origin && y === 0) continue
+      const sy = n(toScreen(d, 0, y)[1])
+      content += `<path d="M${n(ax)},${sy}h-5" stroke="#374151"/><text x="${n(ax - 8)}" y="${n(sy + 4)}" text-anchor="end">${formatNumber(y)}</text>`
+    }
+    if (origin) content += `<text x="${n(ax - 6)}" y="${n(ay + 17)}" text-anchor="end">0</text>`
   }
-  content += `<rect x="76" y="54" width="690" height="354" stroke="#9ca3af" fill="none"/>`
-  if (d.xMin < 0 && d.xMax > 0) content += `<path d="M${toScreen(d, 0, 0)[0]},54V408" stroke="#9ca3af"/>`
-  if (d.yMin < 0 && d.yMax > 0) content += `<path d="M76,${toScreen(d, 0, 0)[1]}H766" stroke="#9ca3af"/>`
-  content += `<text x="421" y="453" text-anchor="middle">${escapeXml(d.xLabel)}</text><text transform="translate(18 231) rotate(-90)" text-anchor="middle">${escapeXml(d.yLabel)}</text>`
+  if (names) {
+    // Names sit at the arrow tips: X to the right of its arrow, Y beside the top of its arrow.
+    content += `<text x="${n(right + 24)}" y="${n(ay + 4)}">${escapeXml(d.xLabel)}</text>`
+    content += `<text x="${n(ax + 10)}" y="${n(L.top - 10)}">${escapeXml(d.yLabel)}</text>`
+  }
   content += `<g clip-path="url(#plot-clip)">${d.curves.map(c => curveMarkup(c, d)).join('')}</g>`
-  d.curves.forEach((c, i) => {
-    const x = 76 + (i % 3) * 230, y = 477 + Math.floor(i / 3) * 18
-    const mark = c.kind === 'data' ? markerShape(c.marker ?? 'circle', x + 11, y - 4, c.color, 3.5) : ''
-    content += `<path d="M${x},${y - 4}h22" stroke="${c.color}" stroke-width="2.4" ${c.dashed ? 'stroke-dasharray="6 3"' : ''}/>${mark}<text x="${x + 29}" y="${y}"><title>${escapeXml(c.name)}</title>${escapeXml(c.name.length > 14 ? c.name.slice(0, 13) + '…' : c.name)}</text>`
-  })
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">${content}</g></svg>`
+  content += d.curves.filter(c => c.kind === 'data').map(c => dataMarkers(c, d)).join('')
+  if (shows(d, 'showLegend')) {
+    const rows = Math.ceil(d.curves.length / 3)
+    d.curves.forEach((c, i) => {
+      const x = L.left + (i % 3) * (L.w / 3), y = H - 12 - (rows - 1 - Math.floor(i / 3)) * 18
+      const mark = c.kind === 'data' ? markerShape(c.marker ?? 'circle', x + 11, y - 4, c.color, 3.5) : ''
+      content += `<path d="M${n(x)},${y - 4}h22" stroke="${c.color}" stroke-width="2.4" ${c.dashed ? 'stroke-dasharray="6 3"' : ''}/>${mark}<text x="${n(x + 29)}" y="${y}"><title>${escapeXml(c.name)}</title>${escapeXml(c.name.length > 14 ? c.name.slice(0, 13) + '…' : c.name)}</text>`
+    })
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${outer.width}" height="${outer.height}" viewBox="0 0 ${n(W)} ${n(H)}">${content}</g></svg>`
 }
 export function plotDataUrl(d: PlotDocument): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(plotSvg(d))}`
