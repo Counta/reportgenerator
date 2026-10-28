@@ -5,9 +5,12 @@ import PageEditor from '@/components/PageEditor.vue'
 import InsertTableModal from '@/components/InsertTableModal.vue'
 import CircuitEditorModal from '@/components/CircuitEditorModal.vue'
 import InsertImageModal from '@/components/InsertImageModal.vue'
+import PlotEditorModal from '@/components/PlotEditorModal.vue'
+import type { PlotDocument } from '@/types/plot'
 import { circuitBBox, cloneCircuit } from '@/lib/circuit'
 import { formTemplate, CONTENT_REGION } from '@/lib/formTemplate'
 import { exportPage } from '@/lib/exporter'
+import { cloneImage, readImageFile } from '@/lib/image'
 import { useReportsStore } from '@/stores/reports'
 import type { CircuitData, CircuitElement, ImageData, ReportData, TableData } from '@/types'
 
@@ -34,6 +37,7 @@ const currentTitle = computed(() => {
 })
 
 const exporting = ref(false)
+const exportFormat = ref<'png' | 'pdf'>('png')
 const exportStatus = ref('')
 const isInsertModalOpen = ref(false)
 const insertModalDefaultPage = ref(1)
@@ -57,7 +61,7 @@ function cloneSnapshot(r: ReportData): HistorySnapshot {
       cells: t.cells.map((row) => [...row]),
     })),
     circuits: (r.circuits || []).map(cloneCircuit),
-    images: (r.images || []).map((i) => ({ ...i })),
+    images: (r.images || []).map(cloneImage),
   }
 }
 
@@ -202,7 +206,7 @@ function redo() {
 function onKeydown(e: KeyboardEvent) {
   if (e.isComposing || e.keyCode === 229) return
   // 电路图弹窗有自己的撤销栈
-  if (isCircuitModalOpen.value) return
+  if (isCircuitModalOpen.value || isPlotModalOpen.value) return
 
   const isMod = e.ctrlKey || e.metaKey
   if (!isMod) return
@@ -275,6 +279,7 @@ function syncTopbarScale() {
 }
 
 const hasTouch = navigator.maxTouchPoints > 0
+let topbarResizeObserver: ResizeObserver | null = null
 
 // ===== 自定义捏合缩放：只缩放页面画布，顶栏与弹窗不受影响 =====
 const workspaceRef = ref<HTMLElement | null>(null)
@@ -330,6 +335,8 @@ function onWorkspaceTouchEnd(e: TouchEvent) {
 onMounted(() => {
   window.addEventListener('keydown', onKeydown, { capture: true })
   if (hasTouch) {
+    topbarResizeObserver = new ResizeObserver(syncTopbarScale)
+    if (topbarRef.value) topbarResizeObserver.observe(topbarRef.value)
     window.visualViewport?.addEventListener('resize', syncTopbarScale)
     window.visualViewport?.addEventListener('scroll', syncTopbarScale)
     window.addEventListener('resize', syncTopbarScale)
@@ -338,6 +345,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  topbarResizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown, { capture: true })
   if (textChangeTimer) clearTimeout(textChangeTimer)
   if (hasTouch) {
@@ -585,6 +593,38 @@ function onRemoveCircuit(circuitId: string) {
 const isImageModalOpen = ref(false)
 const imageModalDefaultPage = ref(1)
 const editingImage = ref<ImageData | null>(null)
+const pasteStatus = ref('')
+
+// XY plots reuse the existing movable image container, with editable source attached.
+// Persistence, report duplication, text avoidance and export retain the image contract.
+const isPlotModalOpen = ref(false)
+const plotSource = ref<PlotDocument | null>(null)
+const plotDefaultPage = ref(1)
+const editingPlot = ref<ImageData | null>(null)
+function onOpenPlotEditor() {
+  editingPlot.value = null
+  plotSource.value = null
+  plotDefaultPage.value = 1
+  isPlotModalOpen.value = true
+}
+function onConfirmPlot(payload: { plot: PlotDocument; page: number; src: string; naturalW: number; naturalH: number }) {
+  insertImage(payload, editingPlot.value)
+}
+
+async function onPasteImages(page: number, files: File[]) {
+  const targetReportId = reportId.value
+  pasteStatus.value = '正在读取剪贴板图片…'
+  try {
+    for (const file of files) {
+      const source = await readImageFile(file)
+      if (reportId.value !== targetReportId) return
+      insertImage({ page, ...source })
+    }
+    pasteStatus.value = ''
+  } catch (error) {
+    pasteStatus.value = '粘贴失败：' + (error as Error).message
+  }
+}
 
 function onOpenInsertImage(page: number) {
   editingImage.value = null
@@ -598,11 +638,20 @@ function onConfirmInsertImage(payload: {
   naturalW: number
   naturalH: number
 }) {
+  insertImage(payload, editingImage.value)
+}
+
+function insertImage(payload: {
+  plot?: PlotDocument
+  page: number
+  src: string
+  naturalW: number
+  naturalH: number
+}, existing: ImageData | null = null) {
   if (!report.value) return
   recordDiscreteAction()
   const { page, src, naturalW, naturalH } = payload
   const region = page === 1 ? CONTENT_REGION.page1 : CONTENT_REGION.page2
-  const existing = editingImage.value
 
   if (existing) {
     // 更换图片：位置与宽度保持不变，只替换图片内容与原始尺寸
@@ -611,6 +660,7 @@ function onConfirmInsertImage(payload: {
       src,
       naturalW,
       naturalH,
+      ...(payload.plot ? { plot: payload.plot } : {}),
     })
     return
   }
@@ -618,6 +668,7 @@ function onConfirmInsertImage(payload: {
   // 默认宽度：在内容区内等比铺开，宽高中取更紧的一侧
   const w = Math.min(region.w - 40, (region.h - 40) * (naturalW / naturalH))
   const image: ImageData = {
+    ...(payload.plot ? { plot: payload.plot } : {}),
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     page,
     x: Math.round(region.x + (region.w - w) / 2),
@@ -640,6 +691,13 @@ function onEditImage(imageId: string) {
   if (!report.value) return
   const img = report.value.images?.find((x) => x.id === imageId)
   if (!img) return
+  if (img.plot) {
+    editingPlot.value = img
+    plotSource.value = img.plot
+    plotDefaultPage.value = img.page
+    isPlotModalOpen.value = true
+    return
+  }
   imageModalDefaultPage.value = img.page
   editingImage.value = img
   isImageModalOpen.value = true
@@ -674,20 +732,30 @@ function onTitle(e: Event) {
   }
 }
 
-function exportAll() {
-  if (!report.value) return
+async function exportAll() {
+  if (!report.value || exporting.value) return
+  const format = exportFormat.value
+  const reportTitle = currentTitle.value || '实验报告'
+  const data: ReportData = JSON.parse(JSON.stringify(report.value))
   exporting.value = true
-  exportStatus.value = '正在生成图片…'
-  // 逐页串行导出，避免同时生成多张占用内存
-  ;(async () => {
-    try {
-      const reportTitle = currentTitle.value || '实验报告'
+  exportStatus.value = format === 'pdf' ? '正在生成 PDF…' : '正在生成图片…'
+  try {
+    if (format === 'pdf') {
+      const { exportReportPdf } = await import('@/lib/pdfExporter')
+      const blob = await exportReportPdf(data, formTemplate, (page) => {
+        exportStatus.value = `正在生成 PDF：第 ${page}/${formTemplate.pages} 页…`
+      })
+      const url = URL.createObjectURL(blob)
+      download(url, `${reportTitle}.pdf`)
+      // Give the browser time to start the download before releasing the URL.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    } else {
       for (let page = 1; page <= formTemplate.pages; page++) {
         const bgUrl = page === 1 ? '/bg_page1.png' : '/bg_page2.png'
         const { dataUrl } = await exportPage(
           page,
           bgUrl,
-          report.value!,
+          data,
           formTemplate,
           2,
         )
@@ -696,14 +764,14 @@ function exportAll() {
           `${reportTitle}-第${page}页.png`,
         )
       }
-      exportStatus.value = '导出完成 ✓'
-    } catch (e) {
-      console.error(e)
-      exportStatus.value = '导出失败：' + (e as Error).message
-    } finally {
-      setTimeout(() => (exporting.value = false), 600)
     }
-  })()
+    exportStatus.value = '导出完成 ✓'
+  } catch (e) {
+    console.error(e)
+    exportStatus.value = '导出失败：' + (e as Error).message
+  } finally {
+    exporting.value = false
+  }
 }
 
 function download(dataUrl: string, filename: string) {
@@ -897,6 +965,7 @@ function goBack() {
         </button>
       </div>
       <div class="actions">
+        <span v-if="pasteStatus" class="status" role="status">{{ pasteStatus }}</span>
         <span v-if="exportStatus" class="status">{{ exportStatus }}</span>
         <button
           type="button"
@@ -961,9 +1030,19 @@ function goBack() {
           </svg>
           <span>插入图片</span>
         </button>
-        <button class="primary" :disabled="exporting" @click="exportAll">
-          {{ exporting ? '导出中…' : '导出图片' }}
+        <button type="button" class="ghost table-shortcut-btn" @click="onOpenPlotEditor">
+          <svg class="action-svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M5 15h4V7h5v8h5V7h3" /></svg>
+          <span>插入图表</span>
         </button>
+        <div class="export-controls">
+          <select v-model="exportFormat" aria-label="导出格式" :disabled="exporting">
+            <option value="png">PNG 图片</option>
+            <option value="pdf">PDF（A4 · 300 dpi）</option>
+          </select>
+          <button class="primary" :disabled="exporting" @click="exportAll">
+            {{ exporting ? '导出中…' : exportFormat === 'pdf' ? '导出 PDF' : '导出图片' }}
+          </button>
+        </div>
       </div>
     </header>
 
@@ -1002,6 +1081,7 @@ function goBack() {
               @remove:image="onRemoveImage"
               @edit:image="onEditImage"
               @open:insert-image="onOpenInsertImage"
+              @paste:images="onPasteImages"
               @gesture-start="onGestureStart"
               @gesture-end="onGestureEnd"
             />
@@ -1024,6 +1104,14 @@ function goBack() {
       @confirm="onConfirmCircuit"
     />
 
+    <PlotEditorModal
+      v-model:visible="isPlotModalOpen"
+      :source="plotSource"
+      :default-page="plotDefaultPage"
+      :editing="editingPlot !== null"
+      @confirm="onConfirmPlot"
+    />
+
     <InsertImageModal
       v-model:visible="isImageModalOpen"
       :default-page="imageModalDefaultPage"
@@ -1044,6 +1132,8 @@ function goBack() {
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -1055,15 +1145,23 @@ function goBack() {
 }
 
 .title-wrap {
-  flex: 1;
+  flex: 1 1 420px;
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 
+/* Keep each control intact; wrap groups instead of squeezing Chinese labels. */
+.topbar button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .history-btns {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 2px;
   background: var(--bg);
@@ -1098,6 +1196,7 @@ function goBack() {
 
 .table-adjust-btns {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 2px;
   background: var(--bg);
@@ -1143,6 +1242,8 @@ function goBack() {
 
 .course-switch {
   display: flex;
+  flex-shrink: 0;
+  white-space: nowrap;
   align-items: center;
   background: var(--bg);
   padding: 3px 6px;
@@ -1175,9 +1276,10 @@ function goBack() {
 }
 
 .title-input {
+  flex: 1 1 160px;
   width: auto;
   max-width: 380px;
-  min-width: 140px;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--text);
@@ -1193,12 +1295,37 @@ function goBack() {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
   align-items: center;
   gap: 10px;
 }
 
 .status {
+  overflow-wrap: anywhere;
   color: var(--muted);
+  font-size: 13px;
+}
+
+.export-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.export-controls select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
   font-size: 13px;
 }
 
@@ -1229,6 +1356,7 @@ button.ghost:hover {
   color: var(--primary);
 }
 .action-svg {
+  flex-shrink: 0;
   color: currentColor;
 }
 
@@ -1250,6 +1378,7 @@ button.primary:disabled {
 
 .workspace {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 20px;
 }

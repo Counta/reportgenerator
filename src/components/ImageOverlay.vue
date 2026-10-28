@@ -94,14 +94,14 @@ function onResizeStart(e: PointerEvent) {
     class="image-overlay"
     :class="{ editable, 'is-moving': isMoving }"
     :style="style"
-    :title="editable ? '拖动移动 · 双击更换图片' : undefined"
+    :title="editable ? (image.plot ? '拖动移动 · 双击编辑图表' : '拖动移动 · 双击更换图片') : undefined"
     @pointerdown="onMoveStart"
     @dblclick.stop="editable && emit('edit', image.id)"
   >
-    <img :src="image.src" alt="插入图片" draggable="false" />
+    <img :src="image.src" :alt="image.plot ? image.plot.title || '图表' : '插入图片'" draggable="false" />
     <template v-if="editable">
       <div class="i-actions" @pointerdown.stop>
-        <button type="button" title="更换图片" @click.stop="emit('edit', image.id)">更换</button>
+        <button type="button" :title="image.plot ? '编辑图表' : '更换图片'" @click.stop="emit('edit', image.id)">{{ image.plot ? '编辑图表' : '更换' }}</button>
         <button type="button" class="del" title="删除图片" @click.stop="emit('remove', image.id)">删除</button>
       </div>
       <div class="i-resize" title="等比缩放" @pointerdown="onResizeStart" />

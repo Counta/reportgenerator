@@ -84,6 +84,8 @@ export interface CircuitData {
 
 /** 插入到报告中的图片 */
 export interface ImageData {
+  /** Optional editable XY source; src is its self-contained SVG rendering. */
+  plot?: import('./plot').PlotDocument
   id: string
   page: number
   /** 左上角（PDF 点） */

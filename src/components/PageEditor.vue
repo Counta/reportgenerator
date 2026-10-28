@@ -7,7 +7,7 @@ import TableOverlay from '@/components/TableOverlay.vue'
 import CircuitOverlay from '@/components/CircuitOverlay.vue'
 import ImageOverlay from '@/components/ImageOverlay.vue'
 import { circuitObstacles } from '@/lib/circuit'
-import { imageObstacles } from '@/lib/image'
+import { clipboardImages, imageObstacles } from '@/lib/image'
 
 const props = defineProps<{
   page: number
@@ -30,6 +30,7 @@ const emit = defineEmits<{
   (e: 'remove:image', imageId: string): void
   (e: 'edit:image', imageId: string): void
   (e: 'open:insert-image', page: number): void
+  (e: 'paste:images', page: number, files: File[]): void
   (e: 'gesture-start'): void
   (e: 'gesture-end'): void
 }>()
@@ -320,9 +321,30 @@ function onContinuationEditorInput(e: Event) {
 }
 
 function onEditorPaste(e: ClipboardEvent) {
+  if (!props.editable) return
+  const files = clipboardImages(e.clipboardData)
+  if (files.length) {
+    emit('paste:images', props.page, files)
+    return
+  }
   const text = e.clipboardData?.getData('text/plain') || ''
   if (!text) return
-  document.execCommand('insertText', false, text)
+  const editor = e.currentTarget as HTMLElement
+  const selection = window.getSelection()
+  if (!selection || !selection.rangeCount) return
+  const range = selection.getRangeAt(0)
+  if (!editor.contains(range.commonAncestorContainer)) return
+
+  // 一次插入整个文本节点，不依赖浏览器编辑命令对多行 DOM 的处理。
+  range.deleteContents()
+  const node = document.createTextNode(text.replace(/\r\n?/g, '\n'))
+  range.insertNode(node)
+  range.setStartAfter(node)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  // 统一经过对应页的 input 处理，只提交一次（第 2 页还需拼接第 1 页内容）。
+  editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }))
 }
 </script>
 

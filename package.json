@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@chenglou/pretext": "^0.0.9",
+    "jspdf": "^4.2.1",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^2.2.6",
     "pnpm": "^12.11.2",

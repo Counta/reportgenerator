@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
+import { clipboardImages, readImageFile } from '@/lib/image'
 
 const props = defineProps<{
   visible: boolean
@@ -13,6 +14,9 @@ const emit = defineEmits<{
   (e: 'confirm', payload: { page: number; src: string; naturalW: number; naturalH: number }): void
 }>()
 
+const modalRef = ref<HTMLDivElement | null>(null)
+const loading = ref(false)
+let readVersion = 0
 const page = ref(1)
 const fileInput = ref<HTMLInputElement | null>(null)
 const src = ref('')
@@ -22,43 +26,45 @@ const error = ref('')
 
 watch(
   () => props.visible,
-  (val) => {
+  async (val) => {
+    readVersion++
+    loading.value = false
     if (val) {
       page.value = props.defaultPage || 1
       src.value = ''
       naturalW.value = 0
       naturalH.value = 0
       error.value = ''
+      await nextTick()
+      modalRef.value?.focus()
     }
   },
   { immediate: true },
 )
 
-function readFile(file: File | undefined | null) {
+async function readFile(file: File | undefined | null) {
   if (!file) return
-  if (!file.type.startsWith('image/')) {
-    error.value = '请选择图片文件'
-    return
+  const version = ++readVersion
+  loading.value = true
+  error.value = ''
+  try {
+    const image = await readImageFile(file)
+    if (version !== readVersion) return
+    src.value = image.src
+    naturalW.value = image.naturalW
+    naturalH.value = image.naturalH
+  } catch (cause) {
+    if (version === readVersion) error.value = (cause as Error).message
+  } finally {
+    if (version === readVersion) loading.value = false
   }
-  const reader = new FileReader()
-  reader.onload = () => {
-    const url = reader.result as string
-    const img = new Image()
-    img.onload = () => {
-      src.value = url
-      naturalW.value = img.naturalWidth
-      naturalH.value = img.naturalHeight
-      error.value = ''
-    }
-    img.onerror = () => {
-      error.value = '图片读取失败'
-    }
-    img.src = url
-  }
-  reader.onerror = () => {
-    error.value = '文件读取失败'
-  }
-  reader.readAsDataURL(file)
+}
+
+function onPaste(e: ClipboardEvent) {
+  const file = clipboardImages(e.clipboardData)[0]
+  if (!file) return
+  e.preventDefault()
+  void readFile(file)
 }
 
 function onPickClick() {
@@ -70,7 +76,7 @@ function close() {
 }
 
 function submit() {
-  if (!src.value || !naturalW.value || !naturalH.value) return
+  if (loading.value || error.value || !src.value || !naturalW.value || !naturalH.value) return
   emit('confirm', {
     page: page.value,
     src: src.value,
@@ -93,7 +99,10 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div
     v-if="visible"
+    ref="modalRef"
+    tabindex="-1"
     class="modal-backdrop"
+    @paste="onPaste"
     @click.self="close"
     @keydown="onKeydown"
   >
@@ -178,9 +187,10 @@ function onKeydown(e: KeyboardEvent) {
             <path d="m17 8-5-5-5 5" />
             <path d="M12 3v12" />
           </svg>
-          <span v-if="!src" class="pick-tip">点击选择图片文件</span>
+          <span v-if="!src" class="pick-tip">点击选择图片，或按 Ctrl+V 粘贴</span>
           <img v-else :src="src" class="preview-image" alt="预览" />
         </div>
+        <span v-if="loading" class="pick-dims" role="status">正在读取图片…</span>
         <span v-if="error" class="pick-error">{{ error }}</span>
         <span v-if="src && !error" class="pick-dims">
           {{ naturalW }} × {{ naturalH }} px
@@ -191,7 +201,7 @@ function onKeydown(e: KeyboardEvent) {
         <button type="button" class="btn-cancel" @click="close">
           取消
         </button>
-        <button type="button" class="btn-submit" :disabled="!src" @click="submit">
+        <button type="button" class="btn-submit" :disabled="!src || loading || !!error" @click="submit">
           {{ editing ? '确定更换' : '确定插入' }}
         </button>
       </footer>
