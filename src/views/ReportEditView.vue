@@ -14,6 +14,12 @@ import { exportPage } from '@/lib/exporter'
 import { cloneImage, readImageFile } from '@/lib/image'
 import { useReportsStore } from '@/stores/reports'
 import type { CircuitData, CircuitElement, ImageData, ReportData, TableData } from '@/types'
+import {
+  mergeCells,
+  shrinkMergesForRemoveLast,
+  unmergeCells,
+} from '@/lib/tableMerge'
+import type { MergeTarget } from '@/lib/tableMerge'
 
 const route = useRoute()
 const router = useRouter()
@@ -38,7 +44,6 @@ const currentTitle = computed(() => {
 })
 
 const exporting = ref(false)
-const exportFormat = ref<'png' | 'pdf'>('png')
 const exportStatus = ref('')
 const isInsertModalOpen = ref(false)
 const insertModalDefaultPage = ref(1)
@@ -60,10 +65,15 @@ function cloneSnapshot(r: ReportData): HistorySnapshot {
       colWidths: [...t.colWidths],
       rowHeights: [...t.rowHeights],
       cells: t.cells.map((row) => [...row]),
+      ...(t.merges ? { merges: t.merges.map((m) => ({ ...m })) } : {}),
     })),
     circuits: (r.circuits || []).map(cloneCircuit),
     images: (r.images || []).map(cloneImage),
   }
+}
+
+function sameMerges(a: TableData, b: TableData): boolean {
+  return JSON.stringify(a.merges ?? []) === JSON.stringify(b.merges ?? [])
 }
 
 function snapshotsEqual(a: HistorySnapshot, b: HistorySnapshot): boolean {
@@ -92,6 +102,7 @@ function snapshotsEqual(a: HistorySnapshot, b: HistorySnapshot): boolean {
     }
     if (tA.colWidths.some((w, idx) => w !== tB.colWidths[idx])) return false
     if (tA.rowHeights.some((h, idx) => h !== tB.rowHeights[idx])) return false
+    if (!sameMerges(tA, tB)) return false
     for (let r = 0; r < tA.rows; r++) {
       for (let c = 0; c < tA.cols; c++) {
         if ((tA.cells[r]?.[c] ?? '') !== (tB.cells[r]?.[c] ?? '')) return false
@@ -335,6 +346,8 @@ function onWorkspaceTouchEnd(e: TouchEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown, { capture: true })
+  window.addEventListener('pointerdown', onTableInteraction, { capture: true })
+  window.addEventListener('focusin', onTableInteraction)
   if (hasTouch) {
     topbarResizeObserver = new ResizeObserver(syncTopbarScale)
     if (topbarRef.value) topbarResizeObserver.observe(topbarRef.value)
@@ -348,6 +361,8 @@ onMounted(() => {
 onUnmounted(() => {
   topbarResizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown, { capture: true })
+  window.removeEventListener('pointerdown', onTableInteraction, { capture: true })
+  window.removeEventListener('focusin', onTableInteraction)
   if (textChangeTimer) clearTimeout(textChangeTimer)
   if (hasTouch) {
     window.visualViewport?.removeEventListener('resize', syncTopbarScale)
@@ -357,6 +372,25 @@ onUnmounted(() => {
 })
 
 const activeTableId = ref<string | null>(null)
+
+/**
+ * 表格工具栏只在与表格互动时显示：在表格上按下指针或焦点进入表格时显示，
+ * 并把该表格设为 +行 / -行 等按钮的操作对象；在工具栏以外的其他位置操作时隐藏。
+ */
+const tableToolsVisible = ref(false)
+
+function onTableInteraction(e: Event) {
+  const t = e.target
+  if (!(t instanceof Element)) return
+  const overlay = t.closest<HTMLElement>('.table-overlay[data-table-id]')
+  if (overlay?.dataset.tableId) {
+    activeTableId.value = overlay.dataset.tableId
+    tableToolsVisible.value = true
+    return
+  }
+  if (t.closest('.table-adjust-btns')) return
+  tableToolsVisible.value = false
+}
 
 const activeTable = computed<TableData | null>(() => {
   if (
@@ -409,6 +443,7 @@ function onRemoveRow() {
     rows: target.rows - 1,
     rowHeights: newRowHeights,
     cells: newCells,
+    merges: shrinkMergesForRemoveLast(target, 'row'),
   })
 }
 
@@ -450,7 +485,36 @@ function onRemoveCol() {
     cols: target.cols - 1,
     colWidths: newColWidths,
     cells: newCells,
+    merges: shrinkMergesForRemoveLast(target, 'col'),
   })
+}
+
+// ===== 合并单元格（顶栏按钮，作用于表格中当前的选区 / 合并单元格） =====
+const mergeTarget = ref<MergeTarget | null>(null)
+
+function onMergeTarget(target: MergeTarget | null, tableId: string) {
+  if (target) {
+    mergeTarget.value = target
+  } else if (mergeTarget.value?.tableId === tableId) {
+    mergeTarget.value = null
+  }
+}
+
+function findMergeTable(): TableData | null {
+  const t = mergeTarget.value
+  if (!t || !report.value) return null
+  return report.value.tables?.find((tb) => tb.id === t.tableId) ?? null
+}
+
+function onToggleMerge() {
+  const target = mergeTarget.value
+  const table = findMergeTable()
+  if (!target || !table) return
+  onUpdateTable(
+    target.action === 'merge'
+      ? mergeCells(table, target.range)
+      : unmergeCells(table, target.range),
+  )
 }
 
 function onOpenInsertTable(page: number) {
@@ -465,7 +529,9 @@ function onUpdateTable(table: TableData) {
       const oldTable = report.value.tables?.find((t) => t.id === table.id)
       if (
         oldTable &&
-        (oldTable.cols !== table.cols || oldTable.rows !== table.rows)
+        (oldTable.cols !== table.cols ||
+          oldTable.rows !== table.rows ||
+          !sameMerges(oldTable, table))
       ) {
         recordDiscreteAction()
       } else {
@@ -481,6 +547,7 @@ function onRemoveTable(tableId: string) {
     recordDiscreteAction()
     if (activeTableId.value === tableId) {
       activeTableId.value = null
+      tableToolsVisible.value = false
     }
     store.removeTable(report.value.id, tableId)
   }
@@ -518,6 +585,7 @@ function onConfirmInsertTable(payload: {
   }
 
   activeTableId.value = newTable.id
+  tableToolsVisible.value = true
   store.addTable(report.value.id, newTable)
 }
 
@@ -741,9 +809,8 @@ function onTitle(e: Event) {
   }
 }
 
-async function exportAll() {
+async function exportAll(format: 'png' | 'pdf') {
   if (!report.value || exporting.value) return
-  const format = exportFormat.value
   const reportTitle = currentTitle.value || '实验报告'
   const data: ReportData = JSON.parse(JSON.stringify(report.value))
   exporting.value = true
@@ -800,7 +867,27 @@ function goBack() {
 <template>
   <div class="edit-page" ref="editPageRef">
     <header class="topbar" ref="topbarRef">
-      <button class="ghost" @click="goBack">← 返回列表</button>
+      <button
+        class="ghost back-btn"
+        type="button"
+        title="返回列表"
+        aria-label="返回列表"
+        @click="goBack"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="18"
+          height="18"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M15 18l-6-6 6-6" />
+        </svg>
+      </button>
       <div class="title-wrap">
         <input
           class="title-input"
@@ -855,7 +942,13 @@ function goBack() {
           </button>
         </div>
 
-        <div class="table-adjust-btns">
+      </div>
+      <div class="right-tools">
+        <div
+          class="table-adjust-btns"
+          :class="{ 'is-hidden': !tableToolsVisible || !activeTable }"
+          :aria-hidden="!tableToolsVisible || !activeTable"
+        >
           <button
             type="button"
             class="adjust-btn"
@@ -952,105 +1045,137 @@ function goBack() {
             </svg>
             <span>-列</span>
           </button>
-        </div>
-      </div>
-      <div class="course-switch">
-        <span class="switch-label">课程：</span>
-        <button
-          type="button"
-          class="switch-btn"
-          :class="{ active: (report?.values['courseType'] || '模拟电路') === '模拟电路' }"
-          @click="onUpdateField('courseType', '模拟电路')"
-        >
-          模电
-        </button>
-        <button
-          type="button"
-          class="switch-btn"
-          :class="{ active: report?.values['courseType'] === '数字电路' }"
-          @click="onUpdateField('courseType', '数字电路')"
-        >
-          数电
-        </button>
-      </div>
-      <div class="actions">
-        <span v-if="pasteStatus" class="status" role="status">{{ pasteStatus }}</span>
-        <span v-if="exportStatus" class="status">{{ exportStatus }}</span>
-        <button
-          type="button"
-          class="ghost table-shortcut-btn"
-          title="在实验内容中插入表格"
-          @click="onOpenInsertTable(1)"
-        >
-          <svg
-            class="action-svg"
-            viewBox="0 0 24 24"
-            width="15"
-            height="15"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
+          <button
+            type="button"
+            class="adjust-btn"
+            data-keep-table-selection
+            :disabled="!mergeTarget"
+            :title="
+              mergeTarget?.action === 'unmerge'
+                ? '取消合并当前单元格'
+                : '合并选中的单元格（在表格中拖动选择多个单元格）'
+            "
+            @mousedown.prevent
+            @click="onToggleMerge"
           >
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-          </svg>
-          <span>插入表格</span>
-        </button>
-        <button
-          type="button"
-          class="ghost table-shortcut-btn"
-          title="绘制电路图并插入实验内容"
-          @click="onOpenCircuitEditor(1)"
-        >
-          <svg
-            class="action-svg"
-            viewBox="0 0 24 24"
-            width="15"
-            height="15"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-          >
-            <path d="M2 12h4l2-4 3 8 3-8 2 4h6" />
-          </svg>
-          <span>插入电路图</span>
-        </button>
-        <button
-          type="button"
-          class="ghost table-shortcut-btn"
-          title="选择图片并插入实验内容"
-          @click="onOpenInsertImage(1)"
-        >
-          <svg
-            class="action-svg"
-            viewBox="0 0 24 24"
-            width="15"
-            height="15"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <circle cx="8.5" cy="8.5" r="1.5" />
-            <path d="m21 15-5-5L5 21" />
-          </svg>
-          <span>插入图片</span>
-        </button>
-        <button type="button" class="ghost table-shortcut-btn" @click="onOpenPlotEditor">
-          <svg class="action-svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M5 15h4V7h5v8h5V7h3" /></svg>
-          <span>插入图表</span>
-        </button>
-        <div class="export-controls">
-          <select v-model="exportFormat" aria-label="导出格式" :disabled="exporting">
-            <option value="png">PNG 图片</option>
-            <option value="pdf">PDF（A4 · 300 dpi）</option>
-          </select>
-          <button class="primary" :disabled="exporting" @click="exportAll">
-            {{ exporting ? '导出中…' : exportFormat === 'pdf' ? '导出 PDF' : '导出图片' }}
+            <svg
+              class="adjust-icon"
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="3" y="4" width="18" height="16" rx="1" />
+              <path
+                v-if="mergeTarget?.action === 'unmerge'"
+                d="M12 4v16M4 12h5M15 12h5"
+              />
+              <path v-else d="M7 12h10M10 9l-3 3 3 3M14 9l3 3-3 3" />
+            </svg>
+            <span>{{ mergeTarget?.action === 'unmerge' ? '取消合并' : '合并' }}</span>
           </button>
+        </div>
+        <div class="actions">
+          <span v-if="pasteStatus" class="status" role="status">{{ pasteStatus }}</span>
+          <span v-if="exportStatus" class="status">{{ exportStatus }}</span>
+          <div class="btn-group insert-group" role="group" aria-label="插入">
+            <button
+              type="button"
+              class="group-btn"
+              title="在实验内容中插入表格"
+              @click="onOpenInsertTable(1)"
+            >
+              <svg
+                class="action-svg"
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+              </svg>
+              <span>表格</span>
+            </button>
+            <button
+              type="button"
+              class="group-btn"
+              title="选择图片并插入实验内容"
+              @click="onOpenInsertImage(1)"
+            >
+              <svg
+                class="action-svg"
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="m21 15-5-5L5 21" />
+              </svg>
+              <span>图片</span>
+            </button>
+            <button
+              type="button"
+              class="group-btn"
+              title="绘制电路图并插入实验内容"
+              @click="onOpenCircuitEditor(1)"
+            >
+              <svg
+                class="action-svg"
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              >
+                <path d="M2 12h4l2-4 3 8 3-8 2 4h6" />
+              </svg>
+              <span>电路图</span>
+            </button>
+            <button
+              type="button"
+              class="group-btn"
+              title="绘制图表并插入实验内容"
+              @click="onOpenPlotEditor"
+            >
+              <svg class="action-svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M5 15h4V7h5v8h5V7h3" /></svg>
+              <span>图表</span>
+            </button>
+          </div>
+          <div class="export-controls">
+            <button
+              type="button"
+              class="primary"
+              title="导出 PDF（A4 · 300 dpi）"
+              :disabled="exporting"
+              @click="exportAll('pdf')"
+            >
+              导出 PDF
+            </button>
+            <button
+              type="button"
+              class="primary"
+              title="每页导出一张 PNG 图片"
+              :disabled="exporting"
+              @click="exportAll('png')"
+            >
+              导出图片
+            </button>
+          </div>
         </div>
       </div>
     </header>
@@ -1070,6 +1195,32 @@ function goBack() {
           class="page-section"
         >
           <div class="page-divider-label">第 {{ pageNum }} 页</div>
+          <div class="page-wrap-outer">
+            <!-- 课程切换：位于第 1 页左侧（页面外），对齐页首标题；窄屏时移到页面上方 -->
+            <div
+              v-if="pageNum === 1 && report"
+              class="course-switch"
+              role="group"
+              aria-label="课程"
+            >
+              <span class="switch-label">课程</span>
+              <button
+                type="button"
+                class="switch-btn"
+                :class="{ active: (report.values['courseType'] || '模拟电路') === '模拟电路' }"
+                @click="onUpdateField('courseType', '模拟电路')"
+              >
+                模电
+              </button>
+              <button
+                type="button"
+                class="switch-btn"
+                :class="{ active: report.values['courseType'] === '数字电路' }"
+                @click="onUpdateField('courseType', '数字电路')"
+              >
+                数电
+              </button>
+            </div>
           <div class="page-wrap">
             <PageEditor
               v-if="report"
@@ -1093,7 +1244,9 @@ function goBack() {
               @paste:images="onPasteImages"
               @gesture-start="onGestureStart"
               @gesture-end="onGestureEnd"
+              @merge-target="onMergeTarget"
             />
+          </div>
           </div>
         </div>
       </main>
@@ -1249,41 +1402,6 @@ function goBack() {
   cursor: not-allowed;
 }
 
-.course-switch {
-  display: flex;
-  flex-shrink: 0;
-  white-space: nowrap;
-  align-items: center;
-  background: var(--bg);
-  padding: 3px 6px;
-  border-radius: 8px;
-  gap: 4px;
-}
-.switch-label {
-  font-size: 13px;
-  color: var(--muted);
-  font-weight: 500;
-  margin-right: 2px;
-}
-.switch-btn {
-  padding: 4px 10px;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  transition: all 0.15s;
-}
-.switch-btn:hover {
-  color: var(--text);
-}
-.switch-btn.active {
-  background: #fff;
-  color: var(--primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
 .title-input {
   flex: 1 1 160px;
   width: auto;
@@ -1307,9 +1425,31 @@ function goBack() {
   flex-wrap: wrap;
   min-width: 0;
   max-width: 100%;
-  margin-left: auto;
+  justify-content: flex-end;
   align-items: center;
   gap: 10px;
+}
+
+/* 右侧工具区：表格操作栏在上，插入 / 导出按钮在下，整体靠右 */
+.right-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+.right-tools .table-adjust-btns {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  transition: opacity 0.15s ease, visibility 0.15s;
+}
+/* 未与表格互动时隐藏；保留占位，避免顶栏高度变化导致页面内容跳动 */
+.right-tools .table-adjust-btns.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .status {
@@ -1326,16 +1466,39 @@ function goBack() {
   max-width: 100%;
 }
 
-.export-controls select {
-  min-width: 0;
-  max-width: 100%;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
+/* 连体按钮组：相邻按钮共享边框，仅首尾保留圆角 */
+.btn-group {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  border: 1px solid rgba(37, 99, 235, 0.3);
   border-radius: var(--radius);
+  overflow: hidden;
   background: var(--panel);
-  color: var(--text);
-  font: inherit;
+}
+.group-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--primary);
   font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.group-btn + .group-btn {
+  border-left: 1px solid rgba(37, 99, 235, 0.3);
+}
+.group-btn:hover {
+  background: #eff6ff;
+}
+.group-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
 }
 
 button.ghost {
@@ -1350,20 +1513,16 @@ button.ghost:hover {
   color: var(--text);
 }
 
-.table-shortcut-btn {
+/* 返回列表：仅图标的方形按钮 */
+button.ghost.back-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--primary);
-  border-color: rgba(37, 99, 235, 0.3);
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
 }
-.table-shortcut-btn:hover {
-  background: #eff6ff;
-  border-color: var(--primary);
-  color: var(--primary);
-}
+
 .action-svg {
   flex-shrink: 0;
   color: currentColor;
@@ -1429,5 +1588,65 @@ button.primary:disabled {
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.page-wrap-outer {
+  position: relative;
+}
+
+/* 课程切换：竖排贴在第 1 页左侧外边，纵向对齐页首标题（标题位于页高约 7%） */
+.course-switch {
+  position: absolute;
+  right: calc(100% + 12px);
+  top: 6.5%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px;
+  white-space: nowrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.switch-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  text-align: center;
+}
+.switch-btn {
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.switch-btn:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+.switch-btn.active {
+  background: var(--bg);
+  color: var(--primary);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.35);
+}
+
+/* 页面左侧放不下（页面最宽 900px + 两侧约 100px）时，改为横排放在页面上方 */
+@media (max-width: 1140px) {
+  .course-switch {
+    position: static;
+    flex-direction: row;
+    align-items: center;
+    align-self: flex-start;
+    width: max-content;
+    margin-bottom: 8px;
+    padding: 3px 6px;
+  }
 }
 </style>

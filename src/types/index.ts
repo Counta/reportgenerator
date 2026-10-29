@@ -121,6 +121,16 @@ export interface TableData {
   rowHeights: number[]
   /** 单元格文本：cells[行][列] */
   cells: string[][]
+  /** 合并单元格区域（可选，兼容旧数据）；被合并覆盖的单元格内容为空，文本存于左上角单元格 */
+  merges?: TableMerge[]
+}
+
+/** 一个合并单元格区域：左上角 (r, c)，跨 rowSpan 行、colSpan 列 */
+export interface TableMerge {
+  r: number
+  c: number
+  rowSpan: number
+  colSpan: number
 }
 
 /** 表单模板：页面信息 + 字段列表 */

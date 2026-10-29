@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import type { CircuitData, FieldDef, FormTemplate, ImageData, ReportData, TableData } from '@/types'
 import { PAGE_SIZE_PT } from '@/types'
-import { splitExperimentContent } from '@/lib/textLayout'
+import type { MergeTarget } from '@/lib/tableMerge'
+import { isFlowField, layoutFieldText, splitExperimentContent, type FieldTextLayout } from '@/lib/textLayout'
 import TableOverlay from '@/components/TableOverlay.vue'
 import CircuitOverlay from '@/components/CircuitOverlay.vue'
 import ImageOverlay from '@/components/ImageOverlay.vue'
+import ContentFlowEditor from '@/components/ContentFlowEditor.vue'
 import { circuitObstacles } from '@/lib/circuit'
-import { clipboardImages, imageObstacles } from '@/lib/image'
+import { imageObstacles } from '@/lib/image'
 
 const props = defineProps<{
   page: number
@@ -33,6 +35,7 @@ const emit = defineEmits<{
   (e: 'paste:images', page: number, files: File[]): void
   (e: 'gesture-start'): void
   (e: 'gesture-end'): void
+  (e: 'merge-target', target: MergeTarget | null, tableId: string): void
 }>()
 
 const PW = PAGE_SIZE_PT.width
@@ -62,20 +65,23 @@ const positions = computed<Pos[]>(() =>
     })),
 )
 
+// 与导出共用同一份排版结果（见 lib/textLayout.ts）
 const experimentSplit = computed(() => {
   return splitExperimentContent(
     props.data.values['content'] || '',
-    675.1,
-    16,
     props.data.tables || [],
     [...circuitObstacles(props.data.circuits), ...imageObstacles(props.data.images)],
   )
 })
 
-const continuationText = computed(() => {
-  return experimentSplit.value.isOverflow
-    ? experimentSplit.value.page2Lines.join('\n')
-    : ''
+/** 本页多行文本框（实验目的 / 实验器材 / 问题讨论）的排版，与导出共用 */
+const fieldLayouts = computed<Record<string, FieldTextLayout>>(() => {
+  const out: Record<string, FieldTextLayout> = {}
+  for (const f of props.template.fields) {
+    if (f.page !== props.page || !isFlowField(f)) continue
+    out[f.id] = layoutFieldText(props.data.values[f.id] || '', f.page, f.rect)
+  }
+  return out
 })
 
 const pageTables = computed<TableData[]>(() =>
@@ -98,179 +104,8 @@ function onRemoveTable(tableId: string) {
   emit('remove:table', tableId)
 }
 
-// ================= 单一整体输入框与浮动避让 =================
-interface TableSpacer {
-  id: string
-  style: Record<string, string>
-}
-
-// PDF 点 -> 页面相对单位（.page-editor 是 inline-size 容器）
-function pt(n: number): string {
-  return `calc(${n} * 100cqw / ${PW})`
-}
-
-const pageSpacers = computed<TableSpacer[]>(() => {
-  const contentTop = props.page === 1 ? 558 : 98
-  const contentWidth = 675.1
-  const contentLeft = 91.7
-  const gap = 6
-  const out: TableSpacer[] = []
-  // 每侧记录已占用到的底部（相对内容区顶部），用零宽“推块”把浮动推到表格的 y
-  const bottom: Record<'left' | 'right', number> = { left: 0, right: 0 }
-
-  // 表格、电路图与图片统一作为避让障碍
-  const obstacles = [
-    ...pageTables.value.map((t) => ({
-      id: t.id,
-      x: t.x,
-      y: t.y,
-      w: t.colWidths.reduce((a, b) => a + b, 0),
-      h: t.rowHeights.reduce((a, b) => a + b, 0),
-    })),
-    ...circuitObstacles(pageCircuits.value).map((o, i) => ({
-      ...o,
-      id: pageCircuits.value[i]!.id,
-    })),
-    ...imageObstacles(pageImages.value).map((o, i) => ({
-      ...o,
-      id: pageImages.value[i]!.id,
-    })),
-  ]
-
-  // 1. 为每个障碍物计算侧边与间隔块范围
-  const sided = obstacles.map((t) => {
-    const relLeft = Math.max(0, t.x - contentLeft)
-    const relRight = Math.max(0, contentWidth - relLeft - t.w)
-    const side: 'left' | 'right' = relLeft <= relRight ? 'left' : 'right'
-    const spacerW = (side === 'left' ? relLeft : relRight) + t.w + gap
-    const spacerTop = Math.max(0, t.y - contentTop - gap)
-    const spacerBot = spacerTop + t.h + gap * 2
-    return { id: t.id, side, top: spacerTop, bottom: spacerBot, width: spacerW }
-  })
-
-  // 2. 分侧排序后合并垂直重叠的障碍物
-  //    CSS float + clear 只能使同侧浮动依次下排，
-  //    无法让后续浮动回退到更高位置；
-  //    必须把重叠的障碍物合并为一个间隔块。
-  function mergeOnSide(items: typeof sided) {
-    const sorted = items.slice().sort((a, b) => a.top - b.top)
-    const res: { ids: string[]; side: 'left' | 'right'; top: number; bottom: number; width: number }[] = []
-    for (const s of sorted) {
-      const last = res.length ? res[res.length - 1] : null
-      if (last && s.top < last.bottom) {
-        // 垂直重叠 → 扩展已有合并块
-        last.bottom = Math.max(last.bottom, s.bottom)
-        last.width = Math.max(last.width, s.width)
-        last.ids.push(s.id)
-      } else {
-        res.push({ ids: [s.id], side: s.side, top: s.top, bottom: s.bottom, width: s.width })
-      }
-    }
-    return res
-  }
-  const mergedLeft = mergeOnSide(sided.filter((s) => s.side === 'left'))
-  const mergedRight = mergeOnSide(sided.filter((s) => s.side === 'right'))
-  const merged = [...mergedLeft, ...mergedRight].sort((a, b) => a.top - b.top)
-
-  // 3. 生成推块 + 间隔块
-  for (const m of merged) {
-    const push = Math.max(0, m.top - bottom[m.side])
-    const height = m.bottom - m.top
-    // 零宽推块：不占水平空间，只把后续同侧浮动推到正确高度
-    out.push({
-      id: `push-${m.ids.join('-')}`,
-      style: { float: m.side, clear: m.side, width: '0', height: pt(push) },
-    })
-    out.push({
-      id: `spacer-${m.ids.join('-')}`,
-      style: { float: m.side, clear: m.side, width: pt(m.width), height: pt(height) },
-    })
-    bottom[m.side] = Math.max(bottom[m.side], m.top) + height
-  }
-  return out
-})
-
-const contentEditorRef = ref<HTMLDivElement | null>(null)
-const continuationEditorRef = ref<HTMLDivElement | null>(null)
+// 单行输入 / 普通多行框的输入法组字状态
 let isComposing = false
-
-// 编辑器位于 v-for 内，字符串 ref 会变成数组，因此用函数 ref 并在挂载时初始化内容
-function bindContentEditor(el: unknown) {
-  const node = el instanceof HTMLDivElement ? el : null
-  if (node && node !== contentEditorRef.value) {
-    contentEditorRef.value = node
-    setEditorText(node, props.data.values['content'] || '', true)
-  } else if (!node) contentEditorRef.value = null
-}
-
-function bindContinuationEditor(el: unknown) {
-  const node = el instanceof HTMLDivElement ? el : null
-  if (node && node !== continuationEditorRef.value) {
-    continuationEditorRef.value = node
-    setEditorText(node, continuationText.value || '', true)
-  } else if (!node) continuationEditorRef.value = null
-}
-
-// 编辑器 DOM 完全手动管理（不让 Vue 渲染子节点，避免与输入冲突）
-function getTextFromEditor(el: HTMLElement | null): string {
-  if (!el) return ''
-  let text = ''
-  el.childNodes.forEach((n) => {
-    if (n instanceof HTMLElement && n.classList.contains('table-float-spacer')) return
-    if (n.nodeName === 'BR') text += '\n'
-    else if (n instanceof HTMLElement) {
-      if (text && !text.endsWith('\n')) text += '\n'
-      text += n.innerText
-    } else text += n.textContent ?? ''
-  })
-  return text.replace(/\r/g, '')
-}
-
-function renderSpacers(el: HTMLElement | null) {
-  if (!el) return
-  el.querySelectorAll(':scope > .table-float-spacer').forEach((n) => n.remove())
-  const first = el.firstChild
-  for (const s of pageSpacers.value) {
-    const d = document.createElement('div')
-    d.className = 'table-float-spacer'
-    d.contentEditable = 'false'
-    Object.assign(d.style, s.style)
-    el.insertBefore(d, first)
-  }
-}
-
-function setEditorText(el: HTMLElement | null, text: string, force = false) {
-  if (!el) return
-  if (!force && document.activeElement === el) return
-  if (!force && getTextFromEditor(el) === text) return
-  el.textContent = ''
-  if (text) el.appendChild(document.createTextNode(text))
-  renderSpacers(el)
-}
-
-function activeEditor(): HTMLElement | null {
-  return props.page === 1 ? contentEditorRef.value : continuationEditorRef.value
-}
-
-watch(pageSpacers, () => renderSpacers(activeEditor()), { deep: true })
-
-watch(
-  () => props.data.values['content'],
-  (newVal) => {
-    if (props.page === 1) {
-      setEditorText(contentEditorRef.value, newVal || '')
-    }
-  },
-)
-
-watch(
-  continuationText,
-  (newVal) => {
-    if (props.page === 2) {
-      setEditorText(continuationEditorRef.value, newVal || '')
-    }
-  },
-)
 
 function onCompStart() {
   isComposing = true
@@ -288,63 +123,12 @@ function onInputField(e: Event, fieldId: string) {
   emit('update:field', fieldId, val)
 }
 
-function onEditorCompEnd(e: Event) {
-  isComposing = false
-  const el = e.target as HTMLElement
-  const val = getTextFromEditor(el)
-  emit('update:field', 'content', val)
+function onContentChange(text: string) {
+  emit('update:field', 'content', text)
 }
 
-function onEditorInput(e: Event) {
-  if (isComposing) return
-  const el = e.target as HTMLElement
-  const val = getTextFromEditor(el)
-  emit('update:field', 'content', val)
-}
-
-function onContinuationCompEnd(e: Event) {
-  isComposing = false
-  const el = e.target as HTMLElement
-  const val = getTextFromEditor(el)
-  const p1Text = experimentSplit.value.page1Lines.join('\n')
-  const combined = p1Text + (val ? '\n' + val : '')
-  emit('update:field', 'content', combined)
-}
-
-function onContinuationEditorInput(e: Event) {
-  if (isComposing) return
-  const el = e.target as HTMLElement
-  const val = getTextFromEditor(el)
-  const p1Text = experimentSplit.value.page1Lines.join('\n')
-  const combined = p1Text + (val ? '\n' + val : '')
-  emit('update:field', 'content', combined)
-}
-
-function onEditorPaste(e: ClipboardEvent) {
-  if (!props.editable) return
-  const files = clipboardImages(e.clipboardData)
-  if (files.length) {
-    emit('paste:images', props.page, files)
-    return
-  }
-  const text = e.clipboardData?.getData('text/plain') || ''
-  if (!text) return
-  const editor = e.currentTarget as HTMLElement
-  const selection = window.getSelection()
-  if (!selection || !selection.rangeCount) return
-  const range = selection.getRangeAt(0)
-  if (!editor.contains(range.commonAncestorContainer)) return
-
-  // 一次插入整个文本节点，不依赖浏览器编辑命令对多行 DOM 的处理。
-  range.deleteContents()
-  const node = document.createTextNode(text.replace(/\r\n?/g, '\n'))
-  range.insertNode(node)
-  range.setStartAfter(node)
-  range.collapse(true)
-  selection.removeAllRanges()
-  selection.addRange(range)
-  // 统一经过对应页的 input 处理，只提交一次（第 2 页还需拼接第 1 页内容）。
-  editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }))
+function onContentPasteImages(files: File[]) {
+  emit('paste:images', props.page, files)
 }
 </script>
 
@@ -419,17 +203,16 @@ function onEditorPaste(e: ClipboardEvent) {
           </svg>
         </button>
 
-        <div
-          :ref="bindContinuationEditor"
-          class="unified-content-editor"
-          :contenteditable="editable ? 'plaintext-only' : 'false'"
-          spellcheck="false"
-          @compositionstart="onCompStart"
-          @compositionend="onContinuationCompEnd"
-          @input="onContinuationEditorInput"
-          @paste.prevent="onEditorPaste"
-        >
-        </div>
+        <ContentFlowEditor
+          group="content"
+          :page="2"
+          :origin="p.field.rect"
+          :lines="experimentSplit.layout.page2Lines"
+          :source="experimentSplit.layout.source"
+          :editable="editable"
+          @change="onContentChange"
+          @paste-images="onContentPasteImages"
+        />
 
         <span v-if="experimentSplit.isOverflow" class="box-badge">
           已自动接续自第 1 页
@@ -496,17 +279,16 @@ function onEditorPaste(e: ClipboardEvent) {
           </svg>
         </button>
 
-        <div
-          :ref="bindContentEditor"
-          class="unified-content-editor"
-          :contenteditable="editable ? 'plaintext-only' : 'false'"
-          spellcheck="false"
-          @compositionstart="onCompStart"
-          @compositionend="onEditorCompEnd"
-          @input="onEditorInput"
-          @paste.prevent="onEditorPaste"
-        >
-        </div>
+        <ContentFlowEditor
+          group="content"
+          :page="1"
+          :origin="p.field.rect"
+          :lines="experimentSplit.layout.page1Lines"
+          :source="experimentSplit.layout.source"
+          :editable="editable"
+          @change="onContentChange"
+          @paste-images="onContentPasteImages"
+        />
 
         <span
           v-if="experimentSplit.isOverflow"
@@ -517,15 +299,21 @@ function onEditorPaste(e: ClipboardEvent) {
       </div>
 
       <!-- 其他通用 textarea (如 purpose, equipment, discussion) -->
-      <div v-else class="field-box">
-        <textarea
-          :value="data.values[p.field.id] ?? ''"
-          class="layer-textarea"
+      <div v-else-if="fieldLayouts[p.field.id]" class="field-box">
+        <ContentFlowEditor
+          :group="'field:' + p.field.id"
+          :page="page"
+          :origin="p.field.rect"
+          :lines="fieldLayouts[p.field.id]!.lines"
+          :source="fieldLayouts[p.field.id]!.source"
+          :editable="editable"
           :placeholder="p.field.label"
-          @compositionstart="onCompStart"
-          @compositionend="onCompEndField($event, p.field.id)"
-          @input="onInputField($event, p.field.id)"
+          framed
+          @change="(text: string) => emit('update:field', p.field.id, text)"
         />
+        <span v-if="fieldLayouts[p.field.id]!.isOverflow" class="box-badge warning">
+          内容过多：已缩至最小字号仍放不下，超出部分不会导出
+        </span>
       </div>
     </div>
 
@@ -539,6 +327,7 @@ function onEditorPaste(e: ClipboardEvent) {
       @remove="onRemoveTable"
       @gesture-start="emit('gesture-start')"
       @gesture-end="emit('gesture-end')"
+      @merge-target="(target, tableId) => emit('merge-target', target, tableId)"
     />
 
     <!-- 浮动电路图 -->
@@ -632,8 +421,7 @@ function onEditorPaste(e: ClipboardEvent) {
   user-select: none;
 }
 
-.layer-input,
-.layer-textarea {
+.layer-input {
   width: 100%;
   height: 100%;
   font-family: 'SimSun', 'Songti SC', 'STSong', 'SimSun-ExtB', -apple-system, BlinkMacSystemFont, 'Segoe UI',
@@ -652,50 +440,12 @@ function onEditorPaste(e: ClipboardEvent) {
 }
 
 .field-layer:hover .layer-input,
-.field-layer:hover .layer-textarea,
-.layer-input:focus,
-.layer-textarea:focus {
+.layer-input:focus {
   background: rgba(37, 99, 235, 0.08);
   border-color: rgba(37, 99, 235, 0.45);
 }
 
-.layer-textarea {
-  text-align: left;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 
-/* 单一整体输入框：无任何切割分界线，文字自然流淌于横线上 */
-.unified-content-editor {
-  width: 100%;
-  height: 100%;
-  border: none !important;
-  background: transparent !important;
-  outline: none !important;
-  box-shadow: none !important;
-  font-family: 'SimSun', 'Songti SC', 'STSong', 'SimSun-ExtB', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-    'Microsoft YaHei', sans-serif;
-  font-size: calc(16 * 100cqw / 841.92);
-  line-height: calc(545 / 22 * 100cqw / 841.92);
-  color: #000000;
-  padding: 0;
-  overflow: hidden;
-  box-sizing: border-box;
-  white-space: pre-wrap;
-  word-break: break-word;
-  user-select: text;
-  cursor: text;
-}
-.unified-content-editor:focus {
-  background: transparent !important;
-}
-
-.table-float-spacer {
-  background: transparent !important;
-  border: none !important;
-  pointer-events: none;
-  user-select: none;
-}
 
 /* 左侧边动作按钮 */
 .insert-table-side-btn {

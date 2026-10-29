@@ -1,6 +1,13 @@
 import { PAGE_SIZE_PT } from '@/types'
 import type { FormTemplate, ReportData, TableData } from '@/types'
-import { splitExperimentContent, calcCellFontSizePt } from '@/lib/textLayout'
+import {
+  splitExperimentContent,
+  calcCellFontSizePt,
+  CONTENT_FONT_FAMILY,
+  CONTENT_FONT_SIZE,
+  type PositionedLine,
+} from '@/lib/textLayout'
+import { visibleCells } from '@/lib/tableMerge'
 import { circuitDataUrl, circuitDisplayHeight, circuitObstacles } from '@/lib/circuit'
 import { imageObstacles } from '@/lib/image'
 
@@ -123,6 +130,22 @@ function drawField(
   drawWrapped(ctx, value, { x: r, y: top, w, h }, { fontSize, lineHeight: fontSize * 1.5 })
 }
 
+/** 绘制「实验内容」排版行：行框顶端对齐，字号与预览相同 */
+function drawContentLines(
+  ctx: CanvasRenderingContext2D,
+  lines: PositionedLine[],
+  ptToPx: number,
+) {
+  ctx.font = `${CONTENT_FONT_SIZE * ptToPx}px ${CONTENT_FONT_FAMILY}`
+  ctx.fillStyle = '#000'
+  ctx.textBaseline = 'top'
+  ctx.textAlign = 'left'
+  for (const line of lines) {
+    if (!line.text) continue
+    ctx.fillText(line.text, px(line.x, ptToPx), px(line.y, ptToPx))
+  }
+}
+
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
@@ -141,9 +164,10 @@ function drawTableCellText(
   ptToPx: number,
   colWidthPt: number,
   rowHeightPt: number,
+  baseRowHeightPt: number = rowHeightPt,
 ) {
   if (!text) return
-  const sizePt = calcCellFontSizePt(text, colWidthPt, rowHeightPt)
+  const sizePt = calcCellFontSizePt(text, colWidthPt, rowHeightPt, baseRowHeightPt)
   const fontSize = Math.max(sizePt * ptToPx, 8)
   const lineHeight = fontSize * 1.3
   ctx.font = `${fontSize}px ${FONT_FAMILY}`
@@ -202,56 +226,61 @@ function drawTable(
   // 外边框
   ctx.strokeRect(startX, startY, w, h)
 
-  // 内部单元格线及文本
-  let currentY = startY
-  for (let r = 0; r < table.rows; r++) {
-    const rowH = px(table.rowHeights[r], ptToPx)
-    let currentX = startX
-
-    for (let c = 0; c < table.cols; c++) {
-      const colW = px(table.colWidths[c], ptToPx)
-
-      // 竖直分割线
-      if (c < table.cols - 1) {
-        ctx.beginPath()
-        ctx.moveTo(currentX + colW, currentY)
-        ctx.lineTo(currentX + colW, currentY + rowH)
-        ctx.stroke()
-      }
-
-      // 绘制单元格文本（自适应字号）
-      const cellText = table.cells[r]?.[c] ?? ''
-      if (cellText) {
-        const padding = px(3, ptToPx)
-        const cellRect = {
-          x: currentX + padding,
-          y: currentY + padding,
-          w: Math.max(colW - padding * 2, 1),
-          h: Math.max(rowH - padding * 2, 1),
-        }
-        drawTableCellText(
-          ctx,
-          cellText,
-          cellRect,
-          ptToPx,
-          table.colWidths[c],
-          table.rowHeights[r],
-        )
-      }
-
-      currentX += colW
-    }
-
-    // 水平分割线
-    if (r < table.rows - 1) {
-      ctx.beginPath()
-      ctx.moveTo(startX, currentY + rowH)
-      ctx.lineTo(startX + w, currentY + rowH)
-      ctx.stroke()
-    }
-
-    currentY += rowH
+  // 各列 / 各行起点（像素）
+  const colX: number[] = [startX]
+  for (let c = 0; c < table.cols; c++) {
+    colX.push(colX[c] + px(table.colWidths[c], ptToPx))
   }
+  const rowY: number[] = [startY]
+  for (let r = 0; r < table.rows; r++) {
+    rowY.push(rowY[r] + px(table.rowHeights[r], ptToPx))
+  }
+
+  // 逐个可见单元格绘制右边线、底边线及文本；合并区域内部不画线
+  for (const cell of visibleCells(table)) {
+    const x0 = colX[cell.c]
+    const y0 = rowY[cell.r]
+    const x1 = colX[cell.c + cell.colSpan]
+    const y1 = rowY[cell.r + cell.rowSpan]
+
+    ctx.beginPath()
+    if (cell.c + cell.colSpan < table.cols) {
+      ctx.moveTo(x1, y0)
+      ctx.lineTo(x1, y1)
+    }
+    if (cell.r + cell.rowSpan < table.rows) {
+      ctx.moveTo(x0, y1)
+      ctx.lineTo(x1, y1)
+    }
+    ctx.stroke()
+
+    // 绘制单元格文本（自适应字号）
+    const cellText = table.cells[cell.r]?.[cell.c] ?? ''
+    if (cellText) {
+      const padding = px(3, ptToPx)
+      const cellRect = {
+        x: x0 + padding,
+        y: y0 + padding,
+        w: Math.max(x1 - x0 - padding * 2, 1),
+        h: Math.max(y1 - y0 - padding * 2, 1),
+      }
+      drawTableCellText(
+        ctx,
+        cellText,
+        cellRect,
+        ptToPx,
+        sumSpan(table.colWidths, cell.c, cell.colSpan),
+        sumSpan(table.rowHeights, cell.r, cell.rowSpan),
+        table.rowHeights[cell.r],
+      )
+    }
+  }
+}
+
+function sumSpan(sizes: number[], start: number, span: number): number {
+  let total = 0
+  for (let i = start; i < start + span; i++) total += sizes[i] ?? 0
+  return total
 }
 
 /**
@@ -285,8 +314,6 @@ export async function exportPage(
 
   const split = splitExperimentContent(
     data.values['content'] || '',
-    675.1,
-    16,
     data.tables || [],
     [...circuitObstacles(data.circuits), ...imageObstacles(data.images)],
   )
@@ -294,32 +321,13 @@ export async function exportPage(
   for (const f of template.fields) {
     if (f.page !== page) continue
 
+    // 实验内容：直接绘制共享排版结果（与编辑器预览逐行一致）
     if (f.id === 'content') {
-      const lines = split.layout.page1Lines
-      const fontSize = dpi * 16
-      ctx.font = `${fontSize}px ${FONT_FAMILY}`
-      ctx.fillStyle = '#000'
-      ctx.textBaseline = 'top'
-      ctx.textAlign = 'left'
-      for (const line of lines) {
-        if (!line.text) continue
-        ctx.fillText(line.text, px(line.x, dpi), px(line.y, dpi))
-      }
+      drawContentLines(ctx, split.layout.page1Lines, dpi)
       continue
     }
-
     if (f.id === 'contentContinuation') {
-      if (!split.isOverflow) continue
-      const lines = split.layout.page2Lines
-      const fontSize = dpi * 16
-      ctx.font = `${fontSize}px ${FONT_FAMILY}`
-      ctx.fillStyle = '#000'
-      ctx.textBaseline = 'top'
-      ctx.textAlign = 'left'
-      for (const line of lines) {
-        if (!line.text) continue
-        ctx.fillText(line.text, px(line.x, dpi), px(line.y, dpi))
-      }
+      drawContentLines(ctx, split.layout.page2Lines, dpi)
       continue
     }
 

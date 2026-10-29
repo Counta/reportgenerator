@@ -59,6 +59,7 @@ function cloneTable(t: TableData): TableData {
     colWidths: [...t.colWidths],
     rowHeights: [...t.rowHeights],
     cells: t.cells.map((row) => [...row]),
+    ...(t.merges ? { merges: t.merges.map((m) => ({ ...m })) } : {}),
   }
 }
 

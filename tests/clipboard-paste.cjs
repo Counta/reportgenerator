@@ -73,12 +73,26 @@ async function main() {
       await page.keyboard.press('Control+V')
       await page.waitForFunction(count => JSON.parse(localStorage.getItem('report-drawer:reports:v1'))[0].images.length === count, index + 1)
       const imageText = `第${index + 1}页图片旁唯一标记\n\n第二行\n尾行`
+      // Ctrl+A selects only this page's lines; text that flowed to the other page is kept.
+      const before = await readContent()
+      const keptAfter = await editors.nth(1).evaluate((el, src) => {
+        const first = el.querySelector('.flow-line')
+        return first ? src.slice(Number(first.dataset.start)) : ''
+      }, before)
       await paste(index, imageText, true)
       const actual = await readContent()
       assert.equal(actual.split(imageText).length - 1, 1, 'image-adjacent text inserted once')
-      if (index === 0) assert.equal(actual, imageText, 'no extra browser-generated newline')
-      const spacerParents = await editors.nth(index).evaluate(el => [...el.querySelectorAll('.table-float-spacer')].every(spacer => spacer.parentNode === el))
-      assert.equal(spacerParents, true, 'paste does not nest image spacers inside text blocks')
+      if (index === 0) assert.equal(actual, imageText + keptAfter, 'page 1 replaces only its own lines')
+      const overlaps = await page.evaluate(pageIndex => {
+        const pageEl = document.querySelectorAll('.page-editor')[pageIndex]
+        const images = [...pageEl.querySelectorAll('.image-overlay')].map(el => el.getBoundingClientRect())
+        return [...pageEl.querySelectorAll('.flow-line')].filter(line => {
+          if (!line.textContent) return false
+          const r = line.getBoundingClientRect()
+          return images.some(i => r.left < i.right && r.right > i.left && r.top < i.bottom && r.bottom > i.top)
+        }).length
+      }, index)
+      assert.equal(overlaps, 0, 'text lines never overlap images')
     }
     const saved = await readContent()
     await page.reload()
